@@ -33,21 +33,6 @@ A lightweight, high-performance, native Bookmark Bar for **Windows 11 & Windows 
 
 ---
 
-## 🏗️ Building from Source
-
-You can build the project using Visual Studio 2019/2022 or directly via MSBuild from the command line:
-
-```powershell
-C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe NavShelf.csproj /p:Configuration=Release /p:Platform=AnyCPU
-```
-
-The compiled standalone executable will be generated at:
-```
-bin\Release\NavShelf.exe
-```
-
----
-
 ## 📦 Project Structure
 
 ```

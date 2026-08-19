@@ -51,6 +51,7 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Models\BookmarkItem.cs" />
+    <Compile Include="Models\BookmarkDisplayItem.cs" />
     <Compile Include="Models\AppSettings.cs" />
     <Compile Include="Services\BookmarkManager.cs" />
     <Compile Include="Services\Win32Helper.cs" />

@@ -16,6 +16,9 @@ namespace ExplorerBookmarkBar.Views
         private IntPtr _explorerHwnd;
         private readonly ObservableCollection<BookmarkDisplayItem> _displayItems = new ObservableCollection<BookmarkDisplayItem>();
         private readonly bool _isFileDialog;
+        private Point? _dragStartPoint = null;
+        private bool _isDragging = false;
+        private const string DRAG_FORMAT = "NavShelfBookmarkItem";
 
         public BookmarkBarControl(IntPtr explorerHwnd)
         {
@@ -242,6 +245,63 @@ namespace ExplorerBookmarkBar.Views
                         ExplorerComHelper.OpenInNewTab(_explorerHwnd, item.Path);
                     }
                 }
+            }
+            else if (e.ChangedButton == MouseButton.Left)
+            {
+                if (!CheckModalBlocking())
+                {
+                    _dragStartPoint = e.GetPosition(this);
+                    _isDragging = false;
+                }
+            }
+        }
+
+        private void BookmarkButton_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton == MouseButtonState.Pressed && _dragStartPoint.HasValue && !_isDragging)
+            {
+                Point currentPoint = e.GetPosition(this);
+                Vector diff = _dragStartPoint.Value - currentPoint;
+
+                if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                    Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+                {
+                    var btn = sender as Button;
+                    var item = btn != null ? btn.Tag as BookmarkDisplayItem : null;
+                    if (item != null && item.Source != null)
+                    {
+                        _isDragging = true;
+                        DataObject data = new DataObject();
+                        data.SetData(DRAG_FORMAT, item.Source);
+
+                        if (!string.IsNullOrEmpty(item.Path) && (Directory.Exists(item.Path) || File.Exists(item.Path)))
+                        {
+                            var fileList = new System.Collections.Specialized.StringCollection();
+                            fileList.Add(item.Path);
+                            data.SetFileDropList(fileList);
+                        }
+
+                        try
+                        {
+                            DragDrop.DoDragDrop(btn, data, DragDropEffects.Move | DragDropEffects.Copy);
+                        }
+                        finally
+                        {
+                            _isDragging = false;
+                            _dragStartPoint = null;
+                            ClearDropIndicators();
+                        }
+                    }
+                }
+            }
+        }
+
+        private void BookmarkButton_PreviewMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton == MouseButton.Left)
+            {
+                _dragStartPoint = null;
+                _isDragging = false;
             }
         }
 
@@ -470,6 +530,120 @@ namespace ExplorerBookmarkBar.Views
             }
         }
 
+        private void BookmarkButton_DragOver(object sender, DragEventArgs e)
+        {
+            if (CheckModalBlocking())
+            {
+                e.Effects = DragDropEffects.None;
+                e.Handled = true;
+                return;
+            }
+
+            var targetBtn = sender as Button;
+            var targetDisplayItem = targetBtn != null ? targetBtn.Tag as BookmarkDisplayItem : null;
+            if (targetDisplayItem == null) return;
+
+            if (e.Data.GetDataPresent(DRAG_FORMAT))
+            {
+                e.Effects = DragDropEffects.Move;
+                e.Handled = true;
+
+                Point p = e.GetPosition(targetBtn);
+                bool isRightHalf = p.X > (targetBtn.ActualWidth / 2.0);
+                UpdateSingleDropIndicator(targetDisplayItem, isRightHalf);
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                e.Effects = DragDropEffects.Copy;
+                e.Handled = true;
+
+                Point p = e.GetPosition(targetBtn);
+                bool isRightHalf = p.X > (targetBtn.ActualWidth / 2.0);
+                UpdateSingleDropIndicator(targetDisplayItem, isRightHalf);
+            }
+            else
+            {
+                e.Effects = DragDropEffects.None;
+            }
+        }
+
+        private void BookmarkButton_DragLeave(object sender, DragEventArgs e)
+        {
+            var targetBtn = sender as Button;
+            var targetDisplayItem = targetBtn != null ? targetBtn.Tag as BookmarkDisplayItem : null;
+            if (targetDisplayItem != null)
+            {
+                targetDisplayItem.DropIndicatorLeftVisibility = Visibility.Collapsed;
+                targetDisplayItem.DropIndicatorRightVisibility = Visibility.Collapsed;
+            }
+        }
+
+        private void BookmarkButton_Drop(object sender, DragEventArgs e)
+        {
+            ClearDropIndicators();
+
+            if (CheckModalBlocking())
+            {
+                e.Handled = true;
+                return;
+            }
+
+            var targetBtn = sender as Button;
+            var targetDisplayItem = targetBtn != null ? targetBtn.Tag as BookmarkDisplayItem : null;
+            if (targetDisplayItem == null || targetDisplayItem.Source == null) return;
+
+            Point p = e.GetPosition(targetBtn);
+            bool isRightHalf = p.X > (targetBtn.ActualWidth / 2.0);
+
+            if (e.Data.GetDataPresent(DRAG_FORMAT))
+            {
+                var draggedSource = e.Data.GetData(DRAG_FORMAT) as BookmarkItem;
+                if (draggedSource != null && draggedSource != targetDisplayItem.Source)
+                {
+                    int oldIndex = _manager.Bookmarks.IndexOf(draggedSource);
+                    int targetIndex = _manager.Bookmarks.IndexOf(targetDisplayItem.Source);
+
+                    if (oldIndex >= 0 && targetIndex >= 0)
+                    {
+                        int newIndex;
+                        if (oldIndex < targetIndex)
+                        {
+                            newIndex = isRightHalf ? targetIndex : Math.Max(0, targetIndex - 1);
+                        }
+                        else
+                        {
+                            newIndex = isRightHalf ? Math.Min(_manager.Bookmarks.Count - 1, targetIndex + 1) : targetIndex;
+                        }
+
+                        if (newIndex != oldIndex)
+                        {
+                            _manager.MoveBookmark(oldIndex, newIndex);
+                        }
+                    }
+                }
+                e.Handled = true;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
+                if (files != null && files.Length > 0)
+                {
+                    int targetIndex = _manager.Bookmarks.IndexOf(targetDisplayItem.Source);
+                    int insertIndex = isRightHalf ? targetIndex + 1 : targetIndex;
+                    insertIndex = Math.Max(0, Math.Min(_manager.Bookmarks.Count, insertIndex));
+
+                    foreach (var path in files)
+                    {
+                        string name = Path.GetFileName(path.TrimEnd('\\', '/'));
+                        if (string.IsNullOrEmpty(name)) name = path;
+                        _manager.InsertBookmark(insertIndex, name, path);
+                        insertIndex++;
+                    }
+                }
+                e.Handled = true;
+            }
+        }
+
         private void UserControl_DragOver(object sender, DragEventArgs e)
         {
             if (CheckModalBlocking())
@@ -479,26 +653,52 @@ namespace ExplorerBookmarkBar.Views
                 return;
             }
 
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            if (e.Data.GetDataPresent(DRAG_FORMAT))
+            {
+                e.Effects = DragDropEffects.Move;
+                e.Handled = true;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
                 e.Effects = DragDropEffects.Copy;
+                e.Handled = true;
             }
             else
             {
                 e.Effects = DragDropEffects.None;
             }
-            e.Handled = true;
+        }
+
+        private void UserControl_DragLeave(object sender, DragEventArgs e)
+        {
+            ClearDropIndicators();
         }
 
         private void UserControl_Drop(object sender, DragEventArgs e)
         {
+            ClearDropIndicators();
+
             if (CheckModalBlocking())
             {
                 e.Handled = true;
                 return;
             }
 
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            if (e.Data.GetDataPresent(DRAG_FORMAT))
+            {
+                var draggedSource = e.Data.GetData(DRAG_FORMAT) as BookmarkItem;
+                if (draggedSource != null)
+                {
+                    int oldIndex = _manager.Bookmarks.IndexOf(draggedSource);
+                    int lastIndex = _manager.Bookmarks.Count - 1;
+                    if (oldIndex >= 0 && oldIndex != lastIndex && lastIndex >= 0)
+                    {
+                        _manager.MoveBookmark(oldIndex, lastIndex);
+                    }
+                }
+                e.Handled = true;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
                 string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
                 if (files != null && files.Length > 0)
@@ -510,6 +710,33 @@ namespace ExplorerBookmarkBar.Views
                         _manager.AddBookmark(name, path);
                     }
                 }
+                e.Handled = true;
+            }
+        }
+
+        private void UpdateSingleDropIndicator(BookmarkDisplayItem targetItem, bool isRightHalf)
+        {
+            foreach (var item in _displayItems)
+            {
+                if (item == targetItem)
+                {
+                    item.DropIndicatorLeftVisibility = !isRightHalf ? Visibility.Visible : Visibility.Collapsed;
+                    item.DropIndicatorRightVisibility = isRightHalf ? Visibility.Visible : Visibility.Collapsed;
+                }
+                else
+                {
+                    item.DropIndicatorLeftVisibility = Visibility.Collapsed;
+                    item.DropIndicatorRightVisibility = Visibility.Collapsed;
+                }
+            }
+        }
+
+        private void ClearDropIndicators()
+        {
+            foreach (var item in _displayItems)
+            {
+                item.DropIndicatorLeftVisibility = Visibility.Collapsed;
+                item.DropIndicatorRightVisibility = Visibility.Collapsed;
             }
         }
 

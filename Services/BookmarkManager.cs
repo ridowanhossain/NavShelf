@@ -140,6 +140,11 @@ namespace ExplorerBookmarkBar.Services
 
         public void AddBookmark(string name, string path, string iconType = "Folder", string color = "")
         {
+            InsertBookmark(Bookmarks.Count, name, path, iconType, color);
+        }
+
+        public void InsertBookmark(int index, string name, string path, string iconType = "Folder", string color = "")
+        {
             if (string.IsNullOrEmpty(name))
             {
                 name = Path.GetFileName(path.TrimEnd('\\', '/'));
@@ -154,7 +159,14 @@ namespace ExplorerBookmarkBar.Services
             var item = new BookmarkItem(name, path, iconType);
             item.CustomColor = color;
 
-            Bookmarks.Add(item);
+            if (index >= 0 && index <= Bookmarks.Count)
+            {
+                Bookmarks.Insert(index, item);
+            }
+            else
+            {
+                Bookmarks.Add(item);
+            }
             SaveBookmarks();
         }
 

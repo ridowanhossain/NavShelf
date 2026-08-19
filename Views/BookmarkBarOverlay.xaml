@@ -12,6 +12,7 @@
         MinHeight="26"
         AllowDrop="True"
         DragOver="Window_DragOver"
+        DragLeave="Window_DragLeave"
         Drop="Window_Drop">
 
     <Window.Resources>
@@ -140,37 +141,66 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Button Style="{StaticResource BookmarkChipStyle}"
-                                    Tag="{Binding}"
-                                    Click="BookmarkButton_Click"
-                                    MouseRightButtonUp="BookmarkButton_RightClick"
-                                    ToolTip="{Binding Path}">
-                                <Button.ContextMenu>
-                                    <ContextMenu>
-                                        <MenuItem Header="Open in Current Tab" Click="MenuOpenCurrent_Click" />
-                                        <MenuItem Header="Open in New Window" Click="MenuOpenNewWindow_Click" />
-                                        <Separator Background="#383838" />
-                                        <MenuItem Header="Edit Bookmark..." Click="MenuEdit_Click" />
-                                        <MenuItem Header="Copy Path" Click="MenuCopyPath_Click" />
-                                        <Separator Background="#383838" />
-                                        <MenuItem Header="Delete Bookmark" Click="MenuDelete_Click" />
-                                    </ContextMenu>
-                                </Button.ContextMenu>
-                                <StackPanel Orientation="Horizontal">
-                                    <!-- Dynamic Icon -->
-                                    <Path Width="13" Height="13" Margin="0,0,6,0" Stretch="Uniform"
-                                          VerticalAlignment="Center"
-                                          Fill="{Binding IconBrush}"
-                                          Data="{Binding IconGeometry}" />
-                                    <!-- Name -->
-                                    <TextBlock Text="{Binding Name}"
-                                               VerticalAlignment="Center"
-                                               FontSize="12"
-                                               Foreground="{StaticResource TextPrimary}"
-                                               TextTrimming="CharacterEllipsis"
-                                               MaxWidth="180" />
-                                </StackPanel>
-                            </Button>
+                            <Grid Margin="{Binding ItemMargin}">
+                                <Button Style="{StaticResource BookmarkChipStyle}"
+                                        Tag="{Binding}"
+                                        Margin="0"
+                                        Padding="{Binding ItemPadding}"
+                                        AllowDrop="True"
+                                        Click="BookmarkButton_Click"
+                                        PreviewMouseDown="BookmarkButton_PreviewMouseDown"
+                                        PreviewMouseMove="BookmarkButton_PreviewMouseMove"
+                                        PreviewMouseUp="BookmarkButton_PreviewMouseUp"
+                                        DragOver="BookmarkButton_DragOver"
+                                        DragLeave="BookmarkButton_DragLeave"
+                                        Drop="BookmarkButton_Drop"
+                                        MouseRightButtonUp="BookmarkButton_RightClick"
+                                        ToolTip="{Binding Path}">
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Open in Current Tab" Click="MenuOpenCurrent_Click" />
+                                            <MenuItem Header="Open in New Window" Click="MenuOpenNewWindow_Click" />
+                                            <Separator Background="#383838" />
+                                            <MenuItem Header="Edit Bookmark..." Click="MenuEdit_Click" />
+                                            <MenuItem Header="Copy Path" Click="MenuCopyPath_Click" />
+                                            <Separator Background="#383838" />
+                                            <MenuItem Header="Delete Bookmark" Click="MenuDelete_Click" />
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                    <StackPanel Orientation="Horizontal">
+                                        <!-- Dynamic Icon -->
+                                        <Path Width="13" Height="13" Margin="0,0,6,0" Stretch="Uniform"
+                                              VerticalAlignment="Center"
+                                              Fill="{Binding IconBrush}"
+                                              Data="{Binding IconGeometry}" />
+                                        <!-- Name -->
+                                        <TextBlock Text="{Binding Name}"
+                                                   VerticalAlignment="Center"
+                                                   FontSize="12"
+                                                   Foreground="{StaticResource TextPrimary}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   MaxWidth="180" />
+                                    </StackPanel>
+                                </Button>
+
+                                <!-- Drop Indicator: Left Vertical Line -->
+                                <Border Width="2.5" CornerRadius="1"
+                                        HorizontalAlignment="Left"
+                                        VerticalAlignment="Stretch"
+                                        Margin="-2,2,0,2"
+                                        Background="{StaticResource AccentBlue}"
+                                        Visibility="{Binding DropIndicatorLeftVisibility}"
+                                        IsHitTestVisible="False" />
+
+                                <!-- Drop Indicator: Right Vertical Line -->
+                                <Border Width="2.5" CornerRadius="1"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Stretch"
+                                        Margin="0,2,-2,2"
+                                        Background="{StaticResource AccentBlue}"
+                                        Visibility="{Binding DropIndicatorRightVisibility}"
+                                        IsHitTestVisible="False" />
+                            </Grid>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

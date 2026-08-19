@@ -313,6 +313,12 @@ namespace ExplorerBookmarkBar.Services
         public const uint WM_KEYUP = 0x0101;
         public const uint WM_COMMAND = 0x0111;
         public const int VK_RETURN = 0x0D;
+        public const byte VK_CONTROL = 0x11;
+        public const byte VK_L = 0x4C;
+        public const byte VK_MENU = 0x12;
+        public const byte VK_D = 0x44;
+        public const byte VK_V = 0x56;
+        public const uint KEYEVENTF_KEYUP = 0x0002;
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam);

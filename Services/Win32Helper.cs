@@ -1,0 +1,505 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32;
+
+namespace ExplorerBookmarkBar.Services
+{
+    public static class Win32Helper
+    {
+        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+        public const int GWL_STYLE = -16;
+        public const int GWL_EXSTYLE = -20;
+        public const int GWLP_WNDPROC = -4;
+
+        public const int WS_CHILD = 0x40000000;
+        public const int WS_VISIBLE = 0x10000000;
+        public const int WS_CLIPSIBLINGS = 0x04000000;
+        public const int WS_CLIPCHILDREN = 0x02000000;
+        public const int WS_POPUP = unchecked((int)0x80000000);
+
+        public const int WS_EX_TOOLWINDOW = 0x00000080;
+        public const int WS_EX_NOACTIVATE = 0x08000000;
+        public const int WS_EX_TOPMOST = 0x00000008;
+        public const int WS_EX_CONTROLPARENT = 0x00010000;
+
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        public static readonly IntPtr HWND_TOP = new IntPtr(0);
+        public static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOZORDER = 0x0004;
+        public const uint SWP_NOREDRAW = 0x0008;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_FRAMECHANGED = 0x0020;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+        public const uint SWP_HIDEWINDOW = 0x0080;
+        public const uint SWP_NOCOPYBITS = 0x0100;
+        public const uint SWP_NOOWNERZORDER = 0x0200;
+        public const uint SWP_NOSENDCHANGING = 0x0400;
+
+        public const uint GA_PARENT = 1;
+        public const uint GA_ROOT = 2;
+        public const uint GA_ROOTOWNER = 3;
+
+        public const uint MOD_ALT = 0x0001;
+        public const uint MOD_CONTROL = 0x0002;
+        public const uint MOD_SHIFT = 0x0004;
+        public const uint MOD_WIN = 0x0008;
+        public const uint MOD_NOREPEAT = 0x4000;
+
+        public const int WM_SIZE = 0x0005;
+        public const int WM_MOVE = 0x0003;
+        public const int WM_WINDOWPOSCHANGED = 0x0047;
+        public const int WM_WINDOWPOSCHANGING = 0x0046;
+        public const int WM_DESTROY = 0x0002;
+        public const int WM_NCDESTROY = 0x0082;
+        public const int WM_ACTIVATE = 0x0006;
+        public const int WM_SETFOCUS = 0x0007;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X;
+            public int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+
+            public int Width
+            {
+                get { return Right - Left; }
+            }
+
+            public int Height
+            {
+                get { return Bottom - Top; }
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct WINDOWPOS
+        {
+            public IntPtr hwnd;
+            public IntPtr hwndInsertAfter;
+            public int x;
+            public int y;
+            public int cx;
+            public int cy;
+            public uint flags;
+        }
+
+        public delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, IntPtr dwRefData);
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+        public static double GetWindowDpiScale(IntPtr hWnd)
+        {
+            try
+            {
+                uint dpi = GetDpiForWindow(hWnd);
+                if (dpi > 0) return dpi / 96.0;
+            }
+            catch { }
+            return 1.0;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetParent(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("comctl32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass, IntPtr dwRefData);
+
+        [DllImport("comctl32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool RemoveWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass);
+
+        [DllImport("comctl32.dll", SetLastError = true)]
+        public static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        public static string GetWindowClassName(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return string.Empty;
+            StringBuilder sb = new StringBuilder(256);
+            GetClassName(hWnd, sb, 256);
+            return sb.ToString();
+        }
+
+        public static string GetWindowText(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return string.Empty;
+            StringBuilder sb = new StringBuilder(512);
+            GetWindowText(hWnd, sb, 512);
+            return sb.ToString();
+        }
+
+        public static IntPtr GetRootWindow(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return IntPtr.Zero;
+            IntPtr root = GetAncestor(hWnd, GA_ROOT);
+            if (root != IntPtr.Zero) return root;
+            IntPtr rootOwner = GetAncestor(hWnd, GA_ROOTOWNER);
+            if (rootOwner != IntPtr.Zero) return rootOwner;
+            return hWnd;
+        }
+
+        public static bool IsExplorerWindow(IntPtr hWnd, out IntPtr rootHwnd)
+        {
+            rootHwnd = IntPtr.Zero;
+            if (hWnd == IntPtr.Zero) return false;
+
+            rootHwnd = GetRootWindow(hWnd);
+
+            string rootClass = GetWindowClassName(rootHwnd);
+            if (rootClass == "CabinetWClass" || rootClass == "ExploreWClass")
+            {
+                return true;
+            }
+
+            string directClass = GetWindowClassName(hWnd);
+            if (directClass == "CabinetWClass" || directClass == "ExploreWClass")
+            {
+                rootHwnd = hWnd;
+                return true;
+            }
+
+            uint pid;
+            GetWindowThreadProcessId(rootHwnd, out pid);
+            try
+            {
+                Process proc = Process.GetProcessById((int)pid);
+                if (proc != null && proc.ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (rootClass != "Shell_TrayWnd" && rootClass != "Progman" && rootClass != "WorkerW" && !rootClass.Contains("Tray"))
+                    {
+                        if (rootClass == "CabinetWClass") return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        public static IntPtr FindVisibleExplorerWindow()
+        {
+            IntPtr hwnd = IntPtr.Zero;
+            while ((hwnd = FindWindowEx(IntPtr.Zero, hwnd, "CabinetWClass", null)) != IntPtr.Zero)
+            {
+                if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
+                {
+                    RECT rect;
+                    if (GetWindowBounds(hwnd, out rect) && rect.Width > 150 && rect.Height > 150)
+                    {
+                        return hwnd;
+                    }
+                }
+            }
+            return IntPtr.Zero;
+        }
+
+        public const uint WM_SETTEXT = 0x000C;
+        public const uint WM_KEYDOWN = 0x0100;
+        public const uint WM_KEYUP = 0x0101;
+        public const uint WM_COMMAND = 0x0111;
+        public const int VK_RETURN = 0x0D;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam);
+
+        [DllImport("user32.dll")]
+        public static extern int GetDlgCtrlID(IntPtr hWnd);
+
+        public static bool IsFileDialog(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+
+            bool hasFolderView = false;
+            bool hasControls = false;
+
+            EnumChildWindows(hwnd, (ch, lParam) =>
+            {
+                string cls = GetWindowClassName(ch);
+                if (cls == "DUIViewWndClassName" || cls == "SHELLDLL_DefView")
+                {
+                    hasFolderView = true;
+                }
+                else if (cls == "WorkerW" || cls == "ReBarWindow32" || cls == "Address Band Root" || cls == "ComboBoxEx32" || cls == "Edit")
+                {
+                    hasControls = true;
+                }
+                return !(hasFolderView && hasControls);
+            }, IntPtr.Zero);
+
+            return hasFolderView && hasControls;
+        }
+
+        public static List<IntPtr> GetAllVisibleExplorerWindows()
+        {
+            List<IntPtr> list = new List<IntPtr>();
+            EnumWindows((hwnd, lParam) =>
+            {
+                if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
+                {
+                    string cls = GetWindowClassName(hwnd);
+                    if (cls == "CabinetWClass" || cls == "ExploreWClass")
+                    {
+                        list.Add(hwnd);
+                    }
+                    else if (cls == "#32770")
+                    {
+                        if (IsFileDialog(hwnd))
+                        {
+                            list.Add(hwnd);
+                        }
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+            return list;
+        }
+
+        public static bool GetWindowBounds(IntPtr hWnd, out RECT bounds)
+        {
+            bounds = new RECT();
+            if (hWnd == IntPtr.Zero) return false;
+
+            int res = DwmGetWindowAttribute(hWnd, DWMWA_EXTENDED_FRAME_BOUNDS, out bounds, Marshal.SizeOf(typeof(RECT)));
+            if (res == 0 && bounds.Width > 0 && bounds.Height > 0)
+            {
+                return true;
+            }
+
+            return GetWindowRect(hWnd, out bounds);
+        }
+
+        public struct ExplorerLayoutInfo
+        {
+            public int TopBarHeight;
+            public IntPtr ContentContainerHwnd;
+            public RECT ClientRect;
+        }
+
+        /// <summary>
+        /// Analyzes Windows 11 / Windows 10 Explorer window to find where the top bar (Tabs + Address + Command Bar) ends
+        /// and where the content view (ShellTabWindowClass / DUIView / SHELLDLL_DefView) starts.
+        /// </summary>
+        public static ExplorerLayoutInfo DetectExplorerLayout(IntPtr explorerHwnd)
+        {
+            ExplorerLayoutInfo layout = new ExplorerLayoutInfo();
+            layout.TopBarHeight = 135; // Default standard height of Windows 11 Tabs + Address + Command Bar
+            layout.ContentContainerHwnd = IntPtr.Zero;
+
+            RECT clientRect;
+            GetClientRect(explorerHwnd, out clientRect);
+            layout.ClientRect = clientRect;
+
+            if (explorerHwnd == IntPtr.Zero) return layout;
+
+            RECT expScreenRect;
+            GetWindowRect(explorerHwnd, out expScreenRect);
+
+            // Enumerate direct child windows
+            IntPtr contentHwnd = IntPtr.Zero;
+            int highestTop = int.MaxValue;
+
+            EnumChildWindows(explorerHwnd, (ch, lParam) =>
+            {
+                string cls = GetWindowClassName(ch);
+                if (cls == "ShellTabWindowClass" || cls == "DUIViewWndClassName" || cls == "SHELLDLL_DefView")
+                {
+                    RECT childRect;
+                    if (GetWindowRect(ch, out childRect))
+                    {
+                        int relTop = childRect.Top - expScreenRect.Top;
+                        // The content view typically starts below the top bar (e.g. 100-150px)
+                        if (relTop > 60 && relTop < 250 && relTop < highestTop)
+                        {
+                            highestTop = relTop;
+                            contentHwnd = ch;
+                        }
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            if (contentHwnd != IntPtr.Zero && highestTop < int.MaxValue)
+            {
+                layout.TopBarHeight = highestTop;
+                layout.ContentContainerHwnd = contentHwnd;
+            }
+
+            return layout;
+        }
+
+        public static void SetAutoStart(bool enable)
+        {
+            string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+            string appName = "ExplorerBookmarkBar";
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(runKey, true))
+                {
+                    if (key == null) return;
+                    if (enable)
+                    {
+                        string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                        key.SetValue(appName, "\"" + exePath + "\"");
+                    }
+                    else
+                    {
+                        key.DeleteValue(appName, false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool IsAutoStartEnabled()
+        {
+            string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+            string appName = "ExplorerBookmarkBar";
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(runKey, false))
+                {
+                    return key.GetValue(appName) != null;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static System.Windows.Media.ImageSource GetExplorerIconImageSource()
+        {
+            try
+            {
+                string expPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+                using (System.Drawing.Icon ico = System.Drawing.Icon.ExtractAssociatedIcon(expPath))
+                {
+                    if (ico != null)
+                    {
+                        return System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+                            ico.Handle,
+                            System.Windows.Int32Rect.Empty,
+                            System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+    }
+}

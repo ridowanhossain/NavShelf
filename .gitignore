@@ -1,0 +1,25 @@
+## Visual Studio / .NET Build Artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio Code / IDE
+.vs/
+.vscode/
+.idea/
+
+## Temporary / Scratch files
+*.log
+*.tmp
+*.pdb
+scratch/
+scratch_*.*
+test_*.*
+dialog_spy.*
+
+## Compiled Output (kept separate for release builds)
+*.exe
+!NavShelf.exe

@@ -1,0 +1,202 @@
+<Window x:Class="ExplorerBookmarkBar.Views.BookmarkBarOverlay"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Explorer Bookmark Bar"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="False"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        Height="32"
+        MinHeight="26"
+        AllowDrop="True"
+        DragOver="Window_DragOver"
+        Drop="Window_Drop">
+
+    <Window.Resources>
+        <!-- Fluent Dark Theme Colors matching Windows 11 Explorer -->
+        <SolidColorBrush x:Key="BarBackground" Color="#191919" Opacity="0.98" />
+        <SolidColorBrush x:Key="BarBorder" Color="#2B2B2B" />
+        <SolidColorBrush x:Key="ItemHoverBackground" Color="#282828" />
+        <SolidColorBrush x:Key="ItemPressedBackground" Color="#333333" />
+        <SolidColorBrush x:Key="TextPrimary" Color="#EDEDED" />
+        <SolidColorBrush x:Key="TextSecondary" Color="#A0A0A0" />
+        <SolidColorBrush x:Key="AccentBlue" Color="#60CDFF" />
+        <SolidColorBrush x:Key="AccentGold" Color="#FFD54F" />
+
+        <!-- Bookmark Chip Button Style -->
+        <Style x:Key="BookmarkChipStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Padding" Value="7,3,7,3" />
+            <Setter Property="Margin" Value="1,1,2,1" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontFamily" Value="Segoe UI Variable, Segoe UI, sans-serif" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{StaticResource ItemHoverBackground}" />
+                                <Setter TargetName="border" Property="BorderBrush" Value="#383838" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{StaticResource ItemPressedBackground}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Action Button Style -->
+        <Style x:Key="ActionButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource TextSecondary}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Padding" Value="6,3,6,3" />
+            <Setter Property="Margin" Value="1,1,1,1" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{StaticResource ItemHoverBackground}" />
+                                <Setter TargetName="border" Property="BorderBrush" Value="#383838" />
+                                <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{StaticResource ItemPressedBackground}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Dark Context Menu -->
+        <Style TargetType="ContextMenu">
+            <Setter Property="Background" Value="#202020" />
+            <Setter Property="Foreground" Value="#E0E0E0" />
+            <Setter Property="BorderBrush" Value="#353535" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="3" />
+        </Style>
+
+        <Style TargetType="MenuItem">
+            <Setter Property="Foreground" Value="#E0E0E0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Padding" Value="8,5,16,5" />
+        </Style>
+    </Window.Resources>
+
+    <!-- Main Container -->
+    <Border x:Name="MainBorder"
+            Background="{StaticResource BarBackground}"
+            BorderBrush="{StaticResource BarBorder}"
+            BorderThickness="0,0,0,1"
+            Padding="6,1,6,1">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Scrollable Bookmark Chips List -->
+            <ScrollViewer Grid.Column="0"
+                          HorizontalScrollBarVisibility="Hidden"
+                          VerticalScrollBarVisibility="Disabled"
+                          PreviewMouseWheel="ScrollViewer_PreviewMouseWheel"
+                          Focusable="False">
+                <ItemsControl x:Name="BookmarksItemsControl">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Button Style="{StaticResource BookmarkChipStyle}"
+                                    Tag="{Binding}"
+                                    Click="BookmarkButton_Click"
+                                    MouseRightButtonUp="BookmarkButton_RightClick"
+                                    ToolTip="{Binding Path}">
+                                <Button.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Open in Current Tab" Click="MenuOpenCurrent_Click" />
+                                        <MenuItem Header="Open in New Window" Click="MenuOpenNewWindow_Click" />
+                                        <Separator Background="#383838" />
+                                        <MenuItem Header="Edit Bookmark..." Click="MenuEdit_Click" />
+                                        <MenuItem Header="Copy Path" Click="MenuCopyPath_Click" />
+                                        <Separator Background="#383838" />
+                                        <MenuItem Header="Delete Bookmark" Click="MenuDelete_Click" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                                <StackPanel Orientation="Horizontal">
+                                    <!-- Dynamic Icon -->
+                                    <Path Width="13" Height="13" Margin="0,0,6,0" Stretch="Uniform"
+                                          VerticalAlignment="Center"
+                                          Fill="{Binding IconBrush}"
+                                          Data="{Binding IconGeometry}" />
+                                    <!-- Name -->
+                                    <TextBlock Text="{Binding Name}"
+                                               VerticalAlignment="Center"
+                                               FontSize="12"
+                                               Foreground="{StaticResource TextPrimary}"
+                                               TextTrimming="CharacterEllipsis"
+                                               MaxWidth="180" />
+                                </StackPanel>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- Quick Actions: Add Current & Settings -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="4,0,0,0">
+                <!-- Add Current Folder Button -->
+                <Button Style="{StaticResource ActionButtonStyle}"
+                        Click="BtnAddCurrent_Click"
+                        ToolTip="Add Current Folder to Bookmarks">
+                    <StackPanel Orientation="Horizontal">
+                        <Path Width="11" Height="11" Fill="{StaticResource AccentBlue}" Stretch="Uniform"
+                              Data="M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" />
+                        <TextBlock Text="Add" Margin="4,0,0,0" FontSize="11" VerticalAlignment="Center" Foreground="{StaticResource AccentBlue}" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Settings Button -->
+                <Button Style="{StaticResource ActionButtonStyle}"
+                        Click="BtnSettings_Click"
+                        ToolTip="Bookmark Bar Settings &amp; Position Calibration">
+                    <Path Width="12" Height="12" Fill="{StaticResource TextSecondary}" Stretch="Uniform"
+                          Data="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z" />
+                </Button>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

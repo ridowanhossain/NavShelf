@@ -11,6 +11,9 @@ obj/
 .vscode/
 .idea/
 
+## Landing Page (Host separately)
+landing-page/
+
 ## Temporary / Scratch files
 *.log
 *.tmp

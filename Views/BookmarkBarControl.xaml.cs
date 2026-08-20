@@ -263,8 +263,8 @@ namespace ExplorerBookmarkBar.Views
                 Point currentPoint = e.GetPosition(this);
                 Vector diff = _dragStartPoint.Value - currentPoint;
 
-                if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
-                    Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+                double minDragDistance = Math.Max(12.0, SystemParameters.MinimumHorizontalDragDistance * 2.5);
+                if (Math.Abs(diff.X) > minDragDistance || Math.Abs(diff.Y) > minDragDistance)
                 {
                     var btn = sender as Button;
                     var item = btn != null ? btn.Tag as BookmarkDisplayItem : null;
@@ -302,6 +302,10 @@ namespace ExplorerBookmarkBar.Views
             {
                 _dragStartPoint = null;
                 _isDragging = false;
+            }
+            else if (e.ChangedButton == MouseButton.Middle)
+            {
+                e.Handled = true;
             }
         }
 
@@ -827,6 +831,14 @@ namespace ExplorerBookmarkBar.Views
                         {
                             ExplorerComHelper.OpenInNewTab(_explorerHwnd, itemSource.Path);
                         }
+                    }
+                };
+
+                menuItem.PreviewMouseUp += (s, ev) =>
+                {
+                    if (ev.ChangedButton == MouseButton.Middle)
+                    {
+                        ev.Handled = true;
                     }
                 };
 

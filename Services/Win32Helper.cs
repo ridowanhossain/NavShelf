@@ -46,6 +46,7 @@ namespace ExplorerBookmarkBar.Services
         public const uint GA_PARENT = 1;
         public const uint GA_ROOT = 2;
         public const uint GA_ROOTOWNER = 3;
+        public const uint GW_HWNDNEXT = 2;
 
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_CONTROL = 0x0002;
@@ -216,6 +217,12 @@ namespace ExplorerBookmarkBar.Services
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetTopWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetNextWindow(IntPtr hWnd, uint wCmd);
 
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);

@@ -159,6 +159,7 @@
                                     <Button.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="Open in Current Tab" Click="MenuOpenCurrent_Click" />
+                                            <MenuItem Header="Open in New Tab" Click="MenuOpenNewTab_Click" />
                                             <MenuItem Header="Open in New Window" Click="MenuOpenNewWindow_Click" />
                                             <Separator Background="#383838" />
                                             <MenuItem Header="Edit Bookmark..." Click="MenuEdit_Click" />

@@ -109,17 +109,33 @@ namespace ExplorerBookmarkBar.Services
             if (explorerHwnd == IntPtr.Zero || !Win32Helper.IsWindow(explorerHwnd))
                 return IntPtr.Zero;
 
+            // In Windows 11 every tab in an Explorer window gets its own
+            // ShellTabWindowClass child window. The active tab is the topmost
+            // one in Z-order. EnumChildWindows walks the child tree in Z-order
+            // (top to bottom), so the first ShellTabWindowClass we encounter
+            // (ignoring our own bookmark-bar child) is the active tab.
+            // Visibility alone is not enough because all tabs are WS_VISIBLE.
+            IntPtr rootHwnd = Win32Helper.GetRootWindow(explorerHwnd);
+            if (rootHwnd == IntPtr.Zero)
+                return IntPtr.Zero;
+
             IntPtr activeTab = IntPtr.Zero;
-            Win32Helper.EnumChildWindows(explorerHwnd, (ch, lParam) =>
+            Win32Helper.EnumChildWindows(rootHwnd, (ch, lParam) =>
             {
                 string cls = Win32Helper.GetWindowClassName(ch);
+
+                // Skip our own bookmark-bar HwndSource child windows,
+                // which are held on top of the Z-order
+                if (cls.StartsWith("ExplorerBookmarkBar", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
                 if (cls == "ShellTabWindowClass" || cls == "TabWindowClass")
                 {
                     int style = Win32Helper.GetWindowLong(ch, Win32Helper.GWL_STYLE);
                     if ((style & Win32Helper.WS_VISIBLE) != 0)
                     {
                         activeTab = ch;
-                        return false; // Found active visible tab window
+                        return false; // topmost visible tab found = active tab
                     }
                 }
                 return true;
@@ -273,6 +289,37 @@ namespace ExplorerBookmarkBar.Services
                     }
                 }
 
+                // 0. When we know the exact active tab HWND, only use that
+                //    COM window. Every COM entry in Shell.Application.Windows()
+                //    maps to a different tab; using a fallback entry (the first
+                //    visible one) is what causes the folder to change in tab 1.
+                if (activeTabHwnd != IntPtr.Zero)
+                {
+                    for (int i = 0; i < windows.Count; i++)
+                    {
+                        try
+                        {
+                            dynamic win = windows.Item(i);
+                            if (win == null) continue;
+
+                            BrowserTabMatch info = GetTabInfoFromBrowser(win, targetHwnd);
+                            if (info != null && info.TabHwnd != IntPtr.Zero && info.TabHwnd == activeTabHwnd)
+                            {
+                                return info;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // No exact match. Returning an arbitrary "visible" entry here is
+                    // exactly what causes the folder to change in tab 1 when the user
+                    // clicks a bookmark while tab 2/3/4 is active. Fall through to
+                    // NavigateViaAddressBar instead, which targets the truly active tab.
+                    return null;
+                }
+
+                // Legacy path (only used when we could not determine the active tab
+                // HWND, e.g. Windows 10 Explorer without tabbed ShellTabWindowClass).
                 BrowserTabMatch targetHwndFallback = null;
                 BrowserTabMatch anyVisibleFallback = null;
                 BrowserTabMatch firstFallback = null;
@@ -465,6 +512,77 @@ namespace ExplorerBookmarkBar.Services
             return editHwnd;
         }
 
+        private static bool SetClipboardTextWithRetry(string text, int retries = 5, int delayMs = 15)
+        {
+            for (int i = 0; i < retries; i++)
+            {
+                try
+                {
+                    System.Windows.Clipboard.SetText(text);
+                    return true;
+                }
+                catch
+                {
+                    if (i < retries - 1)
+                        System.Threading.Thread.Sleep(delayMs);
+                }
+            }
+            return false;
+        }
+
+        public static string NormalizeSpecialPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return string.Empty;
+
+            if (path.Equals("This PC", StringComparison.OrdinalIgnoreCase) || path.Equals("My Computer", StringComparison.OrdinalIgnoreCase))
+            {
+                return "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+            }
+            if (path.Equals("Recycle Bin", StringComparison.OrdinalIgnoreCase))
+            {
+                return "::{645FF040-5081-101B-9F08-00AA002F954E}";
+            }
+            if (path.Equals("Network", StringComparison.OrdinalIgnoreCase))
+            {
+                return "::{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}";
+            }
+            if (path.Equals("Control Panel", StringComparison.OrdinalIgnoreCase))
+            {
+                return "::{5399E694-AE9C-458F-A337-66197F6B01AA}";
+            }
+            if (path.Equals("Quick Access", StringComparison.OrdinalIgnoreCase) || path.Equals("Home", StringComparison.OrdinalIgnoreCase))
+            {
+                return "::{679F85CB-0220-4080-B29B-55403D05AAB6}";
+            }
+
+            return path;
+        }
+
+        private static bool NavigateWithShellBrowser(IShellBrowser browser, string path)
+        {
+            if (browser == null || string.IsNullOrEmpty(path)) return false;
+
+            IntPtr pidl = IntPtr.Zero;
+            uint sfgao;
+            if (SHParseDisplayName(path, IntPtr.Zero, out pidl, 0, out sfgao) == 0 && pidl != IntPtr.Zero)
+            {
+                try
+                {
+                    int hr = browser.BrowseObject(pidl, SBSP_SAMEBROWSER | SBSP_ABSOLUTE);
+                    return hr == 0;
+                }
+                catch
+                {
+                    return false;
+                }
+                finally
+                {
+                    CoTaskMemFree(pidl);
+                }
+            }
+            return false;
+        }
+
         public static bool NavigateViaAddressBar(IntPtr explorerHwnd, string path)
         {
             if (explorerHwnd == IntPtr.Zero || !Win32Helper.IsWindow(explorerHwnd))
@@ -472,33 +590,32 @@ namespace ExplorerBookmarkBar.Services
 
             try
             {
+                // Ensure WPF button releases keyboard focus
+                try
+                {
+                    System.Windows.Input.Keyboard.ClearFocus();
+                }
+                catch { }
+
                 // Ensure Explorer window is in foreground
                 Win32Helper.SetForegroundWindow(explorerHwnd);
-                System.Threading.Thread.Sleep(20);
+                System.Threading.Thread.Sleep(30);
 
                 // 1. Check if an Edit control is already visible
                 IntPtr edit = FindEditControl(explorerHwnd);
 
-                // 2. If not visible, send WM_COMMAND 41504 (internal accelerator for focus address bar)
+                // 2. If not visible, send Alt+D shortcut to focus and select the address bar
                 if (edit == IntPtr.Zero)
                 {
-                    Win32Helper.SendMessage(explorerHwnd, Win32Helper.WM_COMMAND, (IntPtr)41504, IntPtr.Zero);
-                    System.Threading.Thread.Sleep(30);
+                    Win32Helper.keybd_event(Win32Helper.VK_MENU, 0, 0, UIntPtr.Zero);
+                    Win32Helper.keybd_event(Win32Helper.VK_D, 0, 0, UIntPtr.Zero);
+                    Win32Helper.keybd_event(Win32Helper.VK_D, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    Win32Helper.keybd_event(Win32Helper.VK_MENU, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    System.Threading.Thread.Sleep(80);
                     edit = FindEditControl(explorerHwnd);
                 }
 
-                // 3. If still not visible, send Ctrl+L shortcut
-                if (edit == IntPtr.Zero)
-                {
-                    Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
-                    Win32Helper.keybd_event(Win32Helper.VK_L, 0, 0, UIntPtr.Zero);
-                    Win32Helper.keybd_event(Win32Helper.VK_L, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                    Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                    System.Threading.Thread.Sleep(40);
-                    edit = FindEditControl(explorerHwnd);
-                }
-
-                // 4. If Win32 Edit control exists, set text and press Enter
+                // 3. If Win32 Edit control exists, set text and press Enter
                 if (edit != IntPtr.Zero)
                 {
                     Win32Helper.SendMessage(edit, Win32Helper.WM_SETTEXT, IntPtr.Zero, path);
@@ -507,7 +624,7 @@ namespace ExplorerBookmarkBar.Services
                     return true;
                 }
 
-                // 5. For modern Windows 11 XAML Island Address Bar, paste path via Ctrl+V and press Enter
+                // 4. For modern Windows 11 XAML Island Address Bar, paste path via Ctrl+V and press Enter
                 string prevClipboard = null;
                 try
                 {
@@ -515,7 +632,7 @@ namespace ExplorerBookmarkBar.Services
                     {
                         prevClipboard = System.Windows.Clipboard.GetText();
                     }
-                    System.Windows.Clipboard.SetText(path);
+                    SetClipboardTextWithRetry(path);
                 }
                 catch { }
 
@@ -523,7 +640,7 @@ namespace ExplorerBookmarkBar.Services
                 Win32Helper.keybd_event(Win32Helper.VK_V, 0, 0, UIntPtr.Zero);
                 Win32Helper.keybd_event(Win32Helper.VK_V, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
                 Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                System.Threading.Thread.Sleep(20);
+                System.Threading.Thread.Sleep(50);
 
                 Win32Helper.keybd_event((byte)Win32Helper.VK_RETURN, 0, 0, UIntPtr.Zero);
                 Win32Helper.keybd_event((byte)Win32Helper.VK_RETURN, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
@@ -532,11 +649,11 @@ namespace ExplorerBookmarkBar.Services
                 if (prevClipboard != null)
                 {
                     var timer = new System.Windows.Threading.DispatcherTimer();
-                    timer.Interval = TimeSpan.FromMilliseconds(500);
+                    timer.Interval = TimeSpan.FromMilliseconds(600);
                     timer.Tick += (s, e) =>
                     {
                         timer.Stop();
-                        try { System.Windows.Clipboard.SetText(prevClipboard); } catch { }
+                        try { SetClipboardTextWithRetry(prevClipboard); } catch { }
                     };
                     timer.Start();
                 }
@@ -553,11 +670,7 @@ namespace ExplorerBookmarkBar.Services
         {
             if (string.IsNullOrEmpty(path) || dialogHwnd == IntPtr.Zero) return false;
 
-            // Handle special paths
-            if (path.Equals("This PC", StringComparison.OrdinalIgnoreCase) || path.Equals("My Computer", StringComparison.OrdinalIgnoreCase))
-            {
-                path = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-            }
+            path = NormalizeSpecialPath(path);
 
             try
             {
@@ -607,13 +720,36 @@ namespace ExplorerBookmarkBar.Services
                 }
             }
 
-            // Handle special paths
-            if (path.Equals("This PC", StringComparison.OrdinalIgnoreCase) || path.Equals("My Computer", StringComparison.OrdinalIgnoreCase))
-            {
-                path = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-            }
+            path = NormalizeSpecialPath(path);
 
-            // 1. Primary Strategy: Navigate via Address Bar (guaranteed to affect ONLY the currently active tab)
+            // 1. Primary Strategy: COM IShellBrowser BrowseObject on Active Tab
+            // (Instant, native Shell API, 100% reliable on 1st click, no focus issues, no clipboard touch, no key simulation)
+            try
+            {
+                var match = FindActiveBrowserTab(targetHwnd);
+                if (match != null && match.Browser != null)
+                {
+                    if (NavigateWithShellBrowser(match.Browser, path))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Secondary Strategy: COM win.Navigate2 (Clean in-process COM call)
+            try
+            {
+                var match = FindActiveBrowserTab(targetHwnd);
+                if (match != null && match.Win != null)
+                {
+                    match.Win.Navigate2(path);
+                    return true;
+                }
+            }
+            catch { }
+
+            // 3. Tertiary Strategy: Navigate via Address Bar (only when COM is unavailable)
             if (targetHwnd != IntPtr.Zero && Win32Helper.IsWindow(targetHwnd))
             {
                 if (NavigateViaAddressBar(targetHwnd, path))
@@ -637,44 +773,7 @@ namespace ExplorerBookmarkBar.Services
                 }
             }
 
-            // 2. Secondary Strategy: COM IShellBrowser BrowseObject / Navigate2
-            try
-            {
-                var match = FindActiveBrowserTab(targetHwnd);
-                if (match != null)
-                {
-                    if (match.Browser != null)
-                    {
-                        try
-                        {
-                            IntPtr pidl = IntPtr.Zero;
-                            uint sfgao;
-                            if (SHParseDisplayName(path, IntPtr.Zero, out pidl, 0, out sfgao) == 0 && pidl != IntPtr.Zero)
-                            {
-                                try
-                                {
-                                    match.Browser.BrowseObject(pidl, SBSP_SAMEBROWSER | SBSP_ABSOLUTE);
-                                    return true;
-                                }
-                                finally
-                                {
-                                    CoTaskMemFree(pidl);
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-
-                    if (match.Win != null)
-                    {
-                        match.Win.Navigate2(path);
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            // 3. Fallback: Open using process start
+            // 4. Fallback: Open using process start
             try
             {
                 Process.Start(new ProcessStartInfo
@@ -695,113 +794,116 @@ namespace ExplorerBookmarkBar.Services
         {
             if (string.IsNullOrEmpty(path)) return;
 
-            // Handle special paths
-            if (path.Equals("This PC", StringComparison.OrdinalIgnoreCase) || path.Equals("My Computer", StringComparison.OrdinalIgnoreCase))
-            {
-                path = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-            }
+            path = NormalizeSpecialPath(path);
 
-            if (targetHwnd == IntPtr.Zero)
+            if (targetHwnd == IntPtr.Zero || !Win32Helper.IsWindow(targetHwnd))
             {
                 targetHwnd = Win32Helper.GetForegroundWindow();
+                IntPtr root;
+                if (!Win32Helper.IsExplorerWindow(targetHwnd, out root))
+                {
+                    targetHwnd = Win32Helper.FindVisibleExplorerWindow();
+                }
+                else
+                {
+                    targetHwnd = root;
+                }
+            }
+
+            if (targetHwnd == IntPtr.Zero || !Win32Helper.IsWindow(targetHwnd))
+            {
+                OpenInNewWindow(path);
+                return;
+            }
+
+            // Check if this Explorer window supports tabs (ShellTabWindowClass)
+            IntPtr initialActiveTab = GetActiveShellTabHwnd(targetHwnd);
+            if (initialActiveTab == IntPtr.Zero)
+            {
+                // Classic / non-tabbed Explorer (e.g. Windows 10) -> open in new window
+                OpenInNewWindow(path);
+                return;
             }
 
             try
             {
-                if (targetHwnd != IntPtr.Zero && Win32Helper.IsWindow(targetHwnd))
+                // Ensure WPF button releases keyboard focus
+                try { System.Windows.Input.Keyboard.ClearFocus(); } catch { }
+
+                Win32Helper.SetForegroundWindow(targetHwnd);
+                System.Threading.Thread.Sleep(30);
+
+                // Send Ctrl+T to create a new tab in Windows 11 File Explorer
+                const byte VK_CONTROL = 0x11;
+                const byte VK_T = 0x54;
+                const uint KEYEVENTF_KEYUP = 0x0002;
+
+                Win32Helper.keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+                Win32Helper.keybd_event(VK_T, 0, 0, UIntPtr.Zero);
+                Win32Helper.keybd_event(VK_T, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+                Win32Helper.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+                // In Windows 11, tab creation is asynchronous (takes 50-250ms).
+                // We poll every 35ms to detect when the new tab is active and its COM object is ready,
+                // then navigate via IShellBrowser.BrowseObject (instant, silent, zero address bar typing).
+                int attempts = 0;
+                const int maxAttempts = 35; // ~1.2s timeout
+                var timer = new System.Windows.Threading.DispatcherTimer();
+                timer.Interval = TimeSpan.FromMilliseconds(35);
+                timer.Tick += (s, e) =>
                 {
-                    // Track existing COM windows count before sending Ctrl+T
-                    int prevCount = 0;
-                    Type shellType = Type.GetTypeFromProgID("Shell.Application");
-                    if (shellType != null)
+                    attempts++;
+                    try
                     {
-                        try
+                        IntPtr currentActiveTab = GetActiveShellTabHwnd(targetHwnd);
+                        bool tabChanged = (currentActiveTab != IntPtr.Zero && currentActiveTab != initialActiveTab);
+
+                        // If new tab is active OR we have waited > 300ms (attempts >= 9)
+                        if (tabChanged || attempts >= 9)
                         {
-                            dynamic shell = Activator.CreateInstance(shellType);
-                            dynamic windows = shell.Windows();
-                            prevCount = windows.Count;
-                        }
-                        catch { }
-                    }
-
-                    Win32Helper.SetForegroundWindow(targetHwnd);
-
-                    // Send Ctrl+T to create a new tab in Windows 11 File Explorer
-                    const byte VK_CONTROL = 0x11;
-                    const byte VK_T = 0x54;
-                    const uint KEYEVENTF_KEYUP = 0x0002;
-
-                    Win32Helper.keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-                    Win32Helper.keybd_event(VK_T, 0, 0, UIntPtr.Zero);
-                    Win32Helper.keybd_event(VK_T, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                    Win32Helper.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-
-                    // Wait for new tab COM instance to be created and navigate ONLY the newly added tab
-                    var timer = new System.Windows.Threading.DispatcherTimer();
-                    timer.Interval = TimeSpan.FromMilliseconds(200);
-                    int attempts = 0;
-
-                    timer.Tick += (s, e) =>
-                    {
-                        attempts++;
-                        try
-                        {
-                            if (shellType != null)
+                            var match = FindActiveBrowserTab(targetHwnd);
+                            if (match != null)
                             {
-                                dynamic shell = Activator.CreateInstance(shellType);
-                                dynamic windows = shell.Windows();
-
-                                if (windows.Count > prevCount || attempts >= 3)
+                                if (match.Browser != null && NavigateWithShellBrowser(match.Browser, path))
                                 {
                                     timer.Stop();
+                                    return;
+                                }
 
-                                    // Try navigating the active tab first (new tab gets focused)
-                                    dynamic activeWin = GetActiveBrowserObject(targetHwnd);
-                                    if (activeWin != null)
+                                if (match.Win != null)
+                                {
+                                    try
                                     {
-                                        activeWin.Navigate2(path);
+                                        match.Win.Navigate2(path);
+                                        timer.Stop();
                                         return;
                                     }
-
-                                    // Find the newest COM entry for this Explorer HWND
-                                    for (int i = windows.Count - 1; i >= 0; i--)
-                                    {
-                                        try
-                                        {
-                                            dynamic win = windows.Item(i);
-                                            long hwnd = 0;
-                                            try { hwnd = (long)win.HWND; } catch { }
-
-                                            if (hwnd == targetHwnd.ToInt64() || targetHwnd == IntPtr.Zero)
-                                            {
-                                                win.Navigate2(path);
-                                                return;
-                                            }
-                                        }
-                                        catch { }
-                                    }
-
-                                    if (windows.Count > 0)
-                                    {
-                                        dynamic win = windows.Item(windows.Count - 1);
-                                        win.Navigate2(path);
-                                    }
+                                    catch { }
                                 }
                             }
                         }
-                        catch
+
+                        if (attempts >= maxAttempts)
+                        {
+                            timer.Stop();
+                            // Fallback
+                            NavigateActiveExplorer(targetHwnd, path);
+                        }
+                    }
+                    catch
+                    {
+                        if (attempts >= maxAttempts)
                         {
                             timer.Stop();
                         }
-                    };
-                    timer.Start();
-                    return;
-                }
+                    }
+                };
+                timer.Start();
             }
-            catch { }
-
-            // Fallback: Open in new window
-            OpenInNewWindow(path);
+            catch
+            {
+                OpenInNewWindow(path);
+            }
         }
 
         public static void OpenInNewWindow(string path)

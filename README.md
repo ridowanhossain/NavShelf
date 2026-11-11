@@ -5,7 +5,7 @@
 **The fastest way to access your favourite folders in Windows 11 & 10 File Explorer.**  
 Pin folders to a Chrome-style bookmark bar, open them in new tabs with middle-click, and never dig through the sidebar again.
 
-[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.1.0-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
+[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.1.1-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows)](https://navshelf.nexonic.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 [![.NET Framework](https://img.shields.io/badge/.NET_Framework-4.8-512BD4?style=for-the-badge&logo=dotnet)](https://dotnet.microsoft.com/)
@@ -134,6 +134,9 @@ NavShelf also protects your bookmarks on its own. Every save goes to a temporary
 ---
 
 ## 🆕 What's New
+
+### v1.1.1
+- 🔽 The subfolder **▾** next to each bookmark is now larger, always faintly visible, and has its own click area, so it no longer overlaps the bookmark name. It brightens when you hover the bookmark. The dropdown arrow on bookmark folders is larger too.
 
 ### v1.1.0
 **New features**

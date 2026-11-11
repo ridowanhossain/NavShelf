@@ -199,7 +199,11 @@
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
                             <Grid x:Name="ChipRoot" Margin="{Binding ItemMargin}">
-                                <Button x:Name="ChipButton"
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Button x:Name="ChipButton" Grid.Column="0"
                                         Style="{StaticResource BookmarkChipStyle}"
                                         Tag="{Binding}"
                                         Margin="0"
@@ -229,28 +233,29 @@
                                                    TextTrimming="CharacterEllipsis"
                                                    MaxWidth="180" />
                                         <!-- Folder (group) dropdown arrow: always visible for groups -->
-                                        <Path x:Name="GroupChevron" Width="7" Height="4" Margin="5,1,0,0" Stretch="Fill"
+                                        <Path x:Name="GroupChevron" Width="9" Height="5" Margin="6,1,0,0" Stretch="Fill"
                                               VerticalAlignment="Center" Visibility="Collapsed"
-                                              Fill="{DynamicResource TextSecondary}" Data="M0,0 L8,0 L4,4 Z" />
+                                              Fill="{DynamicResource TextPrimary}" Opacity="0.8" Data="M0,0 L8,0 L4,4 Z" />
                                     </StackPanel>
                                 </Button>
 
-                                <!-- Subfolder browse arrow: sits inside the chip's right padding, appears on hover -->
-                                <Border x:Name="SubfolderChevron"
-                                        Width="10" HorizontalAlignment="Right" VerticalAlignment="Stretch"
-                                        Margin="0,3,1,3" CornerRadius="3"
+                                <!-- Subfolder browse arrow: its own small button right after the chip.
+                                     Faint by default, bright with a background when the chip is hovered. -->
+                                <Border x:Name="SubfolderChevron" Grid.Column="1"
+                                        Width="16" VerticalAlignment="Stretch"
+                                        Margin="0,2,0,2" CornerRadius="4"
                                         Background="Transparent" Cursor="Hand"
                                         Tag="{Binding}"
                                         Visibility="{Binding ChevronVisibility}"
-                                        Opacity="0"
+                                        Opacity="0.45"
                                         ToolTip="Browse subfolders"
                                         PreviewMouseLeftButtonDown="SubfolderChevron_MouseDown">
-                                    <Path Width="7" Height="4" Stretch="Fill" VerticalAlignment="Center" HorizontalAlignment="Center"
-                                          Fill="{DynamicResource TextSecondary}" Data="M0,0 L8,0 L4,4 Z" />
+                                    <Path Width="9" Height="5" Stretch="Fill" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                          Fill="{DynamicResource TextPrimary}" Data="M0,0 L8,0 L4,4 Z" />
                                 </Border>
 
                                 <!-- Drop Indicator: Left Vertical Line -->
-                                <Border Width="2.5" CornerRadius="1"
+                                <Border Grid.ColumnSpan="2" Width="2.5" CornerRadius="1"
                                         HorizontalAlignment="Left"
                                         VerticalAlignment="Stretch"
                                         Margin="-2,2,0,2"
@@ -259,7 +264,7 @@
                                         IsHitTestVisible="False" />
 
                                 <!-- Drop Indicator: Right Vertical Line -->
-                                <Border Width="2.5" CornerRadius="1"
+                                <Border Grid.ColumnSpan="2" Width="2.5" CornerRadius="1"
                                         HorizontalAlignment="Right"
                                         VerticalAlignment="Stretch"
                                         Margin="0,2,-2,2"
@@ -275,7 +280,7 @@
                                     <Setter TargetName="SubfolderChevron" Property="Opacity" Value="1" />
                                 </Trigger>
                                 <Trigger SourceName="SubfolderChevron" Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="SubfolderChevron" Property="Background" Value="{DynamicResource ItemPressedBackground}" />
+                                    <Setter TargetName="SubfolderChevron" Property="Background" Value="{DynamicResource ItemHoverBackground}" />
                                 </Trigger>
                                 <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
                                     <Setter TargetName="ChipButton" Property="BorderBrush" Value="{DynamicResource AccentBlue}" />

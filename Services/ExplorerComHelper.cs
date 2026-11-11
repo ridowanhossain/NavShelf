@@ -674,36 +674,135 @@ namespace ExplorerBookmarkBar.Services
 
             try
             {
-                // Find the File Name Edit control inside the #32770 dialog
-                IntPtr editHwnd = IntPtr.Zero;
+                IntPtr editHwnd = FindFileNameEdit(dialogHwnd);
+                if (editHwnd == IntPtr.Zero) return false;
 
-                Win32Helper.EnumChildWindows(dialogHwnd, (ch, lParam) =>
+                // Remember what was in the File name box (e.g. a suggested save name) so it can be restored.
+                // A leftover rooted path (from an earlier failed attempt) is not worth restoring.
+                string originalText = Win32Helper.GetControlText(editHwnd);
+                if (LooksLikePath(originalText)) originalText = string.Empty;
+
+                Win32Helper.SetForegroundWindow(dialogHwnd);
+                Win32Helper.SendMessage(editHwnd, Win32Helper.WM_SETTEXT, IntPtr.Zero, path);
+
+                // Trigger the dialog's own OK command directly instead of simulating Enter.
+                // A posted Enter keystroke is unreliable: it can be swallowed by the autocomplete
+                // dropdown or ignored when keyboard focus sits on the bookmark bar, which leaves
+                // the path sitting in the File name box without navigating.
+                SendDialogOk(dialogHwnd);
+
+                // Verify: when the dialog navigates into a folder it replaces the File name text.
+                // If the path is still there, retry once, then restore the original text.
+                int attempt = 0;
+                var timer = new System.Windows.Threading.DispatcherTimer();
+                timer.Interval = TimeSpan.FromMilliseconds(350);
+                timer.Tick += (s, e) =>
                 {
-                    string cls = Win32Helper.GetWindowClassName(ch);
-                    if (cls == "Edit")
+                    attempt++;
+                    try
                     {
-                        if (Win32Helper.IsWindowVisible(ch))
+                        if (!Win32Helper.IsWindow(editHwnd)) { timer.Stop(); return; }
+
+                        string current = Win32Helper.GetControlText(editHwnd);
+                        bool stillPath = string.Equals(current, path, StringComparison.OrdinalIgnoreCase);
+
+                        if (!stillPath)
                         {
-                            editHwnd = ch;
-                            return false;
+                            timer.Stop();
+                            // Navigated. If the dialog emptied the box, put back the suggested file name.
+                            if (string.IsNullOrEmpty(current) && !string.IsNullOrEmpty(originalText))
+                                Win32Helper.SendMessage(editHwnd, Win32Helper.WM_SETTEXT, IntPtr.Zero, originalText);
+                            return;
+                        }
+
+                        if (attempt == 1)
+                        {
+                            // Retry with a real Enter key as a second strategy
+                            Win32Helper.SetForegroundWindow(dialogHwnd);
+                            SendDialogOk(dialogHwnd);
+                            Win32Helper.PostMessage(editHwnd, Win32Helper.WM_KEYDOWN, (IntPtr)Win32Helper.VK_RETURN, IntPtr.Zero);
+                            Win32Helper.PostMessage(editHwnd, Win32Helper.WM_KEYUP, (IntPtr)Win32Helper.VK_RETURN, IntPtr.Zero);
+                        }
+                        else
+                        {
+                            // Give up cleanly: don't leave the raw path in the File name box
+                            timer.Stop();
+                            Win32Helper.SendMessage(editHwnd, Win32Helper.WM_SETTEXT, IntPtr.Zero, originalText ?? string.Empty);
                         }
                     }
-                    return true;
-                }, IntPtr.Zero);
+                    catch { timer.Stop(); }
+                };
+                timer.Start();
 
-                if (editHwnd != IntPtr.Zero)
-                {
-                    // Focus dialog and enter path into edit box + Enter
-                    Win32Helper.SetForegroundWindow(dialogHwnd);
-                    Win32Helper.SendMessage(editHwnd, Win32Helper.WM_SETTEXT, IntPtr.Zero, path);
-                    Win32Helper.PostMessage(editHwnd, Win32Helper.WM_KEYDOWN, (IntPtr)Win32Helper.VK_RETURN, IntPtr.Zero);
-                    Win32Helper.PostMessage(editHwnd, Win32Helper.WM_KEYUP, (IntPtr)Win32Helper.VK_RETURN, IntPtr.Zero);
-                    return true;
-                }
+                return true;
             }
             catch { }
 
             return false;
+        }
+
+        private static bool LooksLikePath(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            text = text.Trim();
+            return text.StartsWith("::", StringComparison.Ordinal)
+                || text.StartsWith("\\\\", StringComparison.Ordinal)
+                || (text.Length >= 2 && text[1] == ':');
+        }
+
+        private static void SendDialogOk(IntPtr dialogHwnd)
+        {
+            IntPtr okBtn = Win32Helper.GetDlgItem(dialogHwnd, Win32Helper.IDOK);
+            IntPtr wParam = (IntPtr)((Win32Helper.BN_CLICKED << 16) | (Win32Helper.IDOK & 0xFFFF));
+            Win32Helper.PostMessage(dialogHwnd, Win32Helper.WM_COMMAND, wParam, okBtn);
+        }
+
+        /// <summary>
+        /// Finds the "File name" Edit box of a common Open/Save dialog. It lives inside the
+        /// combo box with control ID 1148 (cmb13), or is the Edit with ID 1152 (edt1) on older layouts.
+        /// Falls back to the first visible Edit that is not part of the address bar.
+        /// </summary>
+        private static IntPtr FindFileNameEdit(IntPtr dialogHwnd)
+        {
+            const int CMB13 = 1148;
+            const int EDT1 = 1152;
+            IntPtr exact = IntPtr.Zero;
+            IntPtr fallback = IntPtr.Zero;
+
+            Win32Helper.EnumChildWindows(dialogHwnd, (ch, lParam) =>
+            {
+                if (Win32Helper.GetWindowClassName(ch) != "Edit" || !Win32Helper.IsWindowVisible(ch))
+                    return true;
+
+                int id = Win32Helper.GetDlgCtrlID(ch);
+                IntPtr p1 = Win32Helper.GetParent(ch);
+                IntPtr p2 = p1 != IntPtr.Zero ? Win32Helper.GetParent(p1) : IntPtr.Zero;
+
+                if (id == EDT1 || id == CMB13
+                    || (p1 != IntPtr.Zero && Win32Helper.GetDlgCtrlID(p1) == CMB13)
+                    || (p2 != IntPtr.Zero && Win32Helper.GetDlgCtrlID(p2) == CMB13))
+                {
+                    exact = ch;
+                    return false;
+                }
+
+                if (fallback == IntPtr.Zero)
+                {
+                    // Skip the address bar's edit (lives under "Address Band Root" / breadcrumb)
+                    bool inAddressBar = false;
+                    IntPtr p = p1;
+                    for (int i = 0; i < 6 && p != IntPtr.Zero && p != dialogHwnd; i++)
+                    {
+                        string pc = Win32Helper.GetWindowClassName(p);
+                        if (pc == "Address Band Root" || pc == "Breadcrumb Parent") { inAddressBar = true; break; }
+                        p = Win32Helper.GetParent(p);
+                    }
+                    if (!inAddressBar) fallback = ch;
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            return exact != IntPtr.Zero ? exact : fallback;
         }
 
         public static bool NavigateActiveExplorer(IntPtr targetHwnd, string path)

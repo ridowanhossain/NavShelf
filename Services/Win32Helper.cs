@@ -333,6 +333,35 @@ namespace ExplorerBookmarkBar.Services
         [DllImport("user32.dll")]
         public static extern int GetDlgCtrlID(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+
+        public const uint WM_GETTEXT = 0x000D;
+        public const uint WM_GETTEXTLENGTH = 0x000E;
+        public const int IDOK = 1;
+        public const int BN_CLICKED = 0;
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, StringBuilder lParam);
+
+        /// <summary>
+        /// Reads a control's text via WM_GETTEXT (works for Edit controls in other processes,
+        /// unlike GetWindowText).
+        /// </summary>
+        public static string GetControlText(IntPtr hWnd)
+        {
+            if (hWnd == IntPtr.Zero) return string.Empty;
+            try
+            {
+                int len = (int)SendMessage(hWnd, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+                if (len <= 0) return string.Empty;
+                StringBuilder sb = new StringBuilder(len + 1);
+                SendMessage(hWnd, WM_GETTEXT, (IntPtr)(len + 1), sb);
+                return sb.ToString();
+            }
+            catch { return string.Empty; }
+        }
+
         public static bool IsFileDialog(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;

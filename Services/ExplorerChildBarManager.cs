@@ -34,7 +34,12 @@ namespace ExplorerBookmarkBar.Services
             public int LastWidth;
             public int LastHeight;
             public int LastTop;
+            public bool LastZoomed;
+            public int SettleTicks;
         }
+
+        // Number of 30ms ticks to keep forcing reposition/redraw after a maximize/restore
+        private const int SettleTickCount = 15;
 
         public static Window ActiveModalDialog { get; set; }
         public static event Action<bool> ModalDialogStateChanged;
@@ -179,21 +184,46 @@ namespace ExplorerBookmarkBar.Services
                 string parentClass = Win32Helper.GetWindowClassName(expHwnd);
                 bool isFileDialog = (parentClass == "#32770");
 
+                double dpiScale = Win32Helper.GetWindowDpiScale(expHwnd);
+                ChildBarEntry existing;
+                _activeBars.TryGetValue(expHwnd, out existing);
+
                 int topBarHeight = 134; // Height of Tabs + Address Bar + Command Bar
                 var contentWindows = new List<IntPtr>();
 
                 if (!isFileDialog)
                 {
+                    // The header (title/tabs + address bar + command bar) is a XAML island hosted in a
+                    // DesktopChildSiteBridge that is a direct child of the Explorer window and starts at
+                    // the top of the client area. Use its BOTTOM edge in client coordinates (not its height,
+                    // and not just any bridge) so the bar lines up in maximized, restored and any DPI.
+                    Win32Helper.POINT origin = new Win32Helper.POINT { X = 0, Y = 0 };
+                    Win32Helper.ClientToScreen(expHwnd, ref origin);
+                    int minHeader = (int)Math.Round(60 * dpiScale);
+                    int maxHeader = (int)Math.Round(260 * dpiScale);
+                    int maxHeaderTop = (int)Math.Round(24 * dpiScale);
+                    int headerBottom = -1;
+
                     Win32Helper.EnumChildWindows(expHwnd, (ch, lParam) =>
                     {
                         string cls = Win32Helper.GetWindowClassName(ch);
                         if (cls == "Microsoft.UI.Content.DesktopChildSiteBridge")
                         {
                             Win32Helper.RECT r;
-                            if (Win32Helper.GetWindowRect(ch, out r))
+                            if (Win32Helper.GetParent(ch) == expHwnd
+                                && Win32Helper.IsWindowVisible(ch)
+                                && Win32Helper.GetWindowRect(ch, out r))
                             {
-                                int h = r.Bottom - r.Top;
-                                if (h > 60 && h < 200) topBarHeight = h;
+                                int relTop = r.Top - origin.Y;
+                                int relBottom = r.Bottom - origin.Y;
+                                int w = r.Right - r.Left;
+                                if (relTop >= -maxHeaderTop && relTop <= maxHeaderTop
+                                    && relBottom >= minHeader && relBottom <= maxHeader
+                                    && w >= clientRect.Width / 2
+                                    && relBottom > headerBottom)
+                                {
+                                    headerBottom = relBottom;
+                                }
                             }
                         }
                         else if (cls == "ShellTabWindowClass" || cls == "TabWindowClass")
@@ -202,6 +232,30 @@ namespace ExplorerBookmarkBar.Services
                         }
                         return true;
                     }, IntPtr.Zero);
+
+                    if (headerBottom > 0)
+                    {
+                        topBarHeight = headerBottom;
+                    }
+                    else if (existing != null && existing.LastTop > 0)
+                    {
+                        // Header not measurable right now (e.g. mid maximize/restore animation):
+                        // keep the last good position instead of jumping to a guess.
+                        topBarHeight = existing.LastTop;
+                    }
+                    else
+                    {
+                        // Not attached yet and header not ready: wait for the next tick.
+                        return;
+                    }
+
+                    // Never cover the caption buttons (minimize / maximize / close)
+                    int minSafeTop = (int)Math.Round(80 * dpiScale);
+                    if (topBarHeight < minSafeTop)
+                    {
+                        if (existing != null && existing.LastTop >= minSafeTop) topBarHeight = existing.LastTop;
+                        else return;
+                    }
                 }
                 else
                 {
@@ -228,7 +282,6 @@ namespace ExplorerBookmarkBar.Services
                     }, IntPtr.Zero);
                 }
 
-                double dpiScale = Win32Helper.GetWindowDpiScale(expHwnd);
                 int settingBarHeight = BookmarkManager.Instance.Settings.BarHeight;
                 int physicalBarHeight = (int)Math.Round(settingBarHeight * dpiScale);
                 int clientWidth = clientRect.Width;
@@ -266,7 +319,8 @@ namespace ExplorerBookmarkBar.Services
                         ShellTabHwnd = contentWindows.Count > 0 ? contentWindows[0] : IntPtr.Zero,
                         LastWidth = clientWidth,
                         LastHeight = physicalBarHeight,
-                        LastTop = topBarHeight
+                        LastTop = topBarHeight,
+                        LastZoomed = Win32Helper.IsZoomed(expHwnd)
                     };
 
                     _activeBars[expHwnd] = entry;
@@ -287,8 +341,20 @@ namespace ExplorerBookmarkBar.Services
                 {
                     entry.ShellTabHwnd = contentWindows.Count > 0 ? contentWindows[0] : IntPtr.Zero;
 
+                    // Maximize/restore: Explorer re-lays out its header over several frames.
+                    // Keep forcing position + repaint for a short while so the bar doesn't end up
+                    // stale, half-painted or misplaced.
+                    bool zoomed = Win32Helper.IsZoomed(expHwnd);
+                    if (zoomed != entry.LastZoomed)
+                    {
+                        entry.LastZoomed = zoomed;
+                        entry.SettleTicks = SettleTickCount;
+                    }
+                    bool settling = entry.SettleTicks > 0;
+                    if (settling) entry.SettleTicks--;
+
                     // Update child bar position and ensure it stays at top of Z-order
-                    if (entry.LastWidth != clientWidth || entry.LastHeight != physicalBarHeight || entry.LastTop != topBarHeight)
+                    if (settling || entry.LastWidth != clientWidth || entry.LastHeight != physicalBarHeight || entry.LastTop != topBarHeight)
                     {
                         entry.LastWidth = clientWidth;
                         entry.LastHeight = physicalBarHeight;
@@ -303,6 +369,11 @@ namespace ExplorerBookmarkBar.Services
                             physicalBarHeight,
                             Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_SHOWWINDOW | Win32Helper.SWP_FRAMECHANGED
                         );
+
+                        // Repaint fully so the bar doesn't appear broken/half-drawn after resizing
+                        Win32Helper.RedrawWindow(entry.ChildHwnd, IntPtr.Zero, IntPtr.Zero,
+                            Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ERASE | Win32Helper.RDW_ALLCHILDREN | Win32Helper.RDW_FRAME | Win32Helper.RDW_UPDATENOW);
+                        try { if (entry.Control != null) entry.Control.InvalidateVisual(); } catch { }
                     }
                     else
                     {
@@ -327,8 +398,9 @@ namespace ExplorerBookmarkBar.Services
                     int tabHeight = clientHeight - contentTop;
                     if (tabHeight > 50 && contentWindows.Count > 0)
                     {
-                        Win32Helper.RECT expScreenRect;
-                        Win32Helper.GetWindowRect(expHwnd, out expScreenRect);
+                        // Compare in client coordinates (window rect differs when maximized: -8px frame)
+                        Win32Helper.POINT clientOrigin = new Win32Helper.POINT { X = 0, Y = 0 };
+                        Win32Helper.ClientToScreen(expHwnd, ref clientOrigin);
 
                         foreach (var tabHwnd in contentWindows)
                         {
@@ -337,7 +409,7 @@ namespace ExplorerBookmarkBar.Services
                                 Win32Helper.RECT curTabRect;
                                 Win32Helper.GetWindowRect(tabHwnd, out curTabRect);
 
-                                int curRelTop = curTabRect.Top - expScreenRect.Top;
+                                int curRelTop = curTabRect.Top - clientOrigin.Y;
                                 int curHeight = curTabRect.Bottom - curTabRect.Top;
 
                                 if (Math.Abs(curRelTop - contentTop) > 1 || Math.Abs(curHeight - tabHeight) > 2)

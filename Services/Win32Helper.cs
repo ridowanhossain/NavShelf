@@ -336,6 +336,15 @@ namespace ExplorerBookmarkBar.Services
         [DllImport("user32.dll")]
         public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
 
+        public const uint RDW_INVALIDATE = 0x0001;
+        public const uint RDW_ERASE = 0x0004;
+        public const uint RDW_ALLCHILDREN = 0x0080;
+        public const uint RDW_UPDATENOW = 0x0100;
+        public const uint RDW_FRAME = 0x0400;
+
+        [DllImport("user32.dll")]
+        public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
         public const uint WM_GETTEXT = 0x000D;
         public const uint WM_GETTEXTLENGTH = 0x000E;
         public const int IDOK = 1;

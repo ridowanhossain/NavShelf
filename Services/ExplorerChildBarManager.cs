@@ -99,6 +99,22 @@ namespace ExplorerBookmarkBar.Services
             };
         }
 
+        public bool IsPaused
+        {
+            get { return _isPaused; }
+        }
+
+        /// <summary>Returns the bookmark bar attached to the given Explorer window / file dialog, or null.</summary>
+        public BookmarkBarControl GetBarFor(IntPtr hostHwnd)
+        {
+            ChildBarEntry entry;
+            if (hostHwnd != IntPtr.Zero && _activeBars.TryGetValue(hostHwnd, out entry))
+            {
+                return entry.Control;
+            }
+            return null;
+        }
+
         public void Start()
         {
             _isPaused = false;
@@ -475,12 +491,25 @@ namespace ExplorerBookmarkBar.Services
         {
             try
             {
+                if (entry.Control != null)
+                {
+                    entry.Control.Detach();
+                }
+            }
+            catch { }
+
+            try
+            {
                 if (entry.Source != null)
                 {
+                    entry.Source.RootVisual = null;
                     entry.Source.Dispose();
                 }
             }
             catch { }
+
+            entry.Control = null;
+            entry.Source = null;
         }
 
         private void CleanupAllBars()

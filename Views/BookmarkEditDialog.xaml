@@ -253,7 +253,7 @@
                 </StackPanel>
 
                 <!-- Path Input -->
-                <StackPanel Margin="0,0,0,10">
+                <StackPanel x:Name="PathSection" Margin="0,0,0,10">
                     <TextBlock Text="Folder or File Path" Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="0,0,0,4" />
                     <Grid>
                         <Grid.ColumnDefinitions>
@@ -267,7 +267,7 @@
                 </StackPanel>
 
                 <!-- Icon Type Selector -->
-                <StackPanel Margin="0,0,0,6">
+                <StackPanel x:Name="IconSection" Margin="0,0,0,6">
                     <TextBlock Text="Icon" Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="0,0,0,6" />
                     <WrapPanel x:Name="IconSelectionPanel" Orientation="Horizontal">
                         <!-- Icon options populated dynamically -->

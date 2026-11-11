@@ -53,25 +53,114 @@ namespace ExplorerBookmarkBar.Services
             LoadBookmarks();
         }
 
-        public void LoadSettings()
+        /// <summary>
+        /// Crash-safe write: write to a temp file first, then atomically swap it in,
+        /// keeping the previous good version as "&lt;file&gt;.bak". A power loss or crash
+        /// mid-write can no longer leave a truncated/corrupt config behind.
+        /// </summary>
+        private static void SafeWriteAllText(string path, string content)
+        {
+            string tmp = path + ".tmp";
+            string bak = path + ".bak";
+            File.WriteAllText(tmp, content);
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Replace(tmp, path, bak, true);
+                    return;
+                }
+                catch
+                {
+                    // File.Replace can fail on some file systems; fall back to copy-backup + overwrite
+                    try { File.Copy(path, bak, true); } catch { }
+                    File.Copy(tmp, path, true);
+                    try { File.Delete(tmp); } catch { }
+                    return;
+                }
+            }
+            File.Move(tmp, path);
+        }
+
+        /// <summary>
+        /// Reads and deserializes a config file, falling back to its .bak copy if the main file is
+        /// missing or corrupt. Returns null if neither is usable. Sets restoredFromBackup when the .bak was used.
+        /// </summary>
+        private T ReadWithBackup<T>(string path, Func<T, bool> isValid, out bool restoredFromBackup) where T : class
+        {
+            restoredFromBackup = false;
+            foreach (string candidate in new[] { path, path + ".bak" })
+            {
+                try
+                {
+                    if (!File.Exists(candidate)) continue;
+                    string json = File.ReadAllText(candidate);
+                    if (string.IsNullOrWhiteSpace(json)) continue;
+                    T value = _serializer.Deserialize<T>(json);
+                    if (value != null && isValid(value))
+                    {
+                        restoredFromBackup = candidate != path;
+                        return value;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Serializer messages can embed the whole file content; keep the log short
+                    string msg = ex.Message ?? string.Empty;
+                    int cut = msg.IndexOfAny(new[] { '\r', '\n' });
+                    if (cut >= 0) msg = msg.Substring(0, cut);
+                    if (msg.Length > 120) msg = msg.Substring(0, 120) + "...";
+                    App.Log("Failed to read " + Path.GetFileName(candidate) + ": " + msg);
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Copies the good .bak over the damaged main file. Done directly (not via SafeWriteAllText)
+        /// so the damaged file is never rotated into .bak and the good backup is kept.
+        /// </summary>
+        private static void RestoreFromBackup(string path)
+        {
+            try { File.Copy(path + ".bak", path, true); }
+            catch (Exception ex) { App.Log("Restore from backup failed: " + ex.Message); }
+        }
+
+        /// <summary>Keeps an unreadable config file aside instead of silently overwriting it.</summary>
+        private static void PreserveCorruptFile(string path)
         {
             try
             {
-                if (File.Exists(_settingsFile))
-                {
-                    string json = File.ReadAllText(_settingsFile);
-                    AppSettings s = _serializer.Deserialize<AppSettings>(json);
-                    if (s != null)
-                    {
-                        if (s.TopOffset < 110)
-                        {
-                            s.TopOffset = 135;
-                        }
-                        Settings = s;
-                    }
-                }
+                if (!File.Exists(path)) return;
+                string aside = path + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                File.Copy(path, aside, true);
+                App.Log("Unreadable config preserved as " + Path.GetFileName(aside));
             }
             catch { }
+        }
+
+        public void LoadSettings()
+        {
+            bool fromBackup;
+            AppSettings s = ReadWithBackup<AppSettings>(_settingsFile, x => true, out fromBackup);
+            if (s != null)
+            {
+                if (s.TopOffset < 110)
+                {
+                    s.TopOffset = 135;
+                }
+                Settings = s;
+                if (fromBackup)
+                {
+                    PreserveCorruptFile(_settingsFile);
+                    App.Log("settings.json was unreadable; restored from backup.");
+                    RestoreFromBackup(_settingsFile);
+                }
+            }
+            else
+            {
+                PreserveCorruptFile(_settingsFile);
+            }
         }
 
         public void SaveSettings()
@@ -79,7 +168,7 @@ namespace ExplorerBookmarkBar.Services
             try
             {
                 string json = _serializer.Serialize(Settings);
-                File.WriteAllText(_settingsFile, json);
+                SafeWriteAllText(_settingsFile, json);
                 if (SettingsChanged != null)
                 {
                     SettingsChanged();
@@ -91,29 +180,42 @@ namespace ExplorerBookmarkBar.Services
         public void LoadBookmarks()
         {
             Bookmarks.Clear();
-            try
-            {
-                if (File.Exists(_bookmarksFile))
-                {
-                    string json = File.ReadAllText(_bookmarksFile);
-                    BookmarkItem[] items = _serializer.Deserialize<BookmarkItem[]>(json);
-                    if (items != null && items.Length > 0)
-                    {
-                        foreach (var item in items)
-                        {
-                            Bookmarks.Add(item);
-                        }
-                        if (BookmarksChanged != null)
-                        {
-                            BookmarksChanged();
-                        }
-                        return;
-                    }
-                }
-            }
-            catch { }
 
-            // Initialize defaults if empty or first run
+            bool fromBackup;
+            BookmarkItem[] items = ReadWithBackup<BookmarkItem[]>(_bookmarksFile, x => true, out fromBackup);
+
+            if (items != null && items.Length == 0)
+            {
+                // File read fine but the user removed everything: same as first run (no backup restore)
+                AddDefaultBookmarks();
+                return;
+            }
+
+            if (items != null)
+            {
+                foreach (var item in items)
+                {
+                    if (item != null) Bookmarks.Add(item);
+                }
+
+                if (fromBackup)
+                {
+                    // Main file was damaged: keep it for inspection, then rewrite it from the backup
+                    PreserveCorruptFile(_bookmarksFile);
+                    App.Log("bookmarks.json was unreadable; restored " + Bookmarks.Count + " bookmarks from backup.");
+                    RestoreFromBackup(_bookmarksFile);
+                }
+
+                if (BookmarksChanged != null)
+                {
+                    BookmarksChanged();
+                }
+                return;
+            }
+
+            // Neither the file nor its backup is usable (or this is the first run).
+            // Never destroy an existing file we couldn't read: keep a copy before writing defaults.
+            PreserveCorruptFile(_bookmarksFile);
             AddDefaultBookmarks();
         }
 
@@ -129,7 +231,7 @@ namespace ExplorerBookmarkBar.Services
             try
             {
                 string json = _serializer.Serialize(Bookmarks);
-                File.WriteAllText(_bookmarksFile, json);
+                SafeWriteAllText(_bookmarksFile, json);
                 if (BookmarksChanged != null)
                 {
                     BookmarksChanged();
@@ -172,11 +274,181 @@ namespace ExplorerBookmarkBar.Services
 
         public void RemoveBookmark(BookmarkItem item)
         {
-            if (item != null && Bookmarks.Contains(item))
+            if (item == null) return;
+            if (DetachItem(item))
             {
-                Bookmarks.Remove(item);
                 SaveBookmarks();
             }
+        }
+
+        // ───────────────────────── Bookmark folders (groups) ─────────────────────────
+
+        public IEnumerable<BookmarkItem> GetGroups()
+        {
+            foreach (var b in Bookmarks)
+            {
+                if (b != null && b.IsFolder) yield return b;
+            }
+        }
+
+        /// <summary>Returns the group that directly contains the item, or null if it is top-level / not found.</summary>
+        public BookmarkItem FindParentGroup(BookmarkItem item)
+        {
+            if (item == null) return null;
+            foreach (var g in Bookmarks)
+            {
+                if (g != null && g.IsFolder && g.Children != null && g.Children.Contains(item)) return g;
+            }
+            return null;
+        }
+
+        /// <summary>Removes the item from wherever it lives (bar or a group) without saving.</summary>
+        private bool DetachItem(BookmarkItem item)
+        {
+            if (Bookmarks.Remove(item)) return true;
+            var parent = FindParentGroup(item);
+            return parent != null && parent.Children.Remove(item);
+        }
+
+        public BookmarkItem AddGroup(string name, int index = -1)
+        {
+            if (string.IsNullOrWhiteSpace(name)) name = "New Folder";
+            var group = new BookmarkItem(name.Trim(), "", "Group", true);
+            if (index >= 0 && index <= Bookmarks.Count) Bookmarks.Insert(index, group);
+            else Bookmarks.Add(group);
+            SaveBookmarks();
+            return group;
+        }
+
+        public void MoveIntoGroup(BookmarkItem item, BookmarkItem group)
+        {
+            if (item == null || group == null || !group.IsFolder || item == group) return;
+            if (item.IsFolder) return; // no nested groups
+            if (group.Children == null) group.Children = new List<BookmarkItem>();
+            if (group.Children.Contains(item)) return;
+            DetachItem(item);
+            group.Children.Add(item);
+            SaveBookmarks();
+        }
+
+        public void MoveOutOfGroup(BookmarkItem item, int index = -1)
+        {
+            var parent = FindParentGroup(item);
+            if (parent == null) return;
+            parent.Children.Remove(item);
+            if (index < 0 || index > Bookmarks.Count)
+            {
+                int gi = Bookmarks.IndexOf(parent);
+                index = gi >= 0 ? gi + 1 : Bookmarks.Count;
+            }
+            Bookmarks.Insert(index, item);
+            SaveBookmarks();
+        }
+
+        /// <summary>Deletes a group. Its bookmarks are kept and put back on the bar where the group was.</summary>
+        public void DeleteGroup(BookmarkItem group, bool keepChildren)
+        {
+            int idx = Bookmarks.IndexOf(group);
+            if (idx < 0) return;
+            Bookmarks.RemoveAt(idx);
+            if (keepChildren && group.Children != null)
+            {
+                foreach (var c in group.Children)
+                {
+                    Bookmarks.Insert(idx++, c);
+                }
+            }
+            SaveBookmarks();
+        }
+
+        public void AddBookmarkToGroup(BookmarkItem group, string name, string path)
+        {
+            if (group == null || !group.IsFolder) return;
+            if (string.IsNullOrEmpty(name))
+            {
+                name = Path.GetFileName(path.TrimEnd('\\', '/'));
+                if (string.IsNullOrEmpty(name)) name = path;
+            }
+            if (group.Children == null) group.Children = new List<BookmarkItem>();
+            group.Children.Add(new BookmarkItem(name, path, DetectIconType(path)));
+            SaveBookmarks();
+        }
+
+        // ───────────────────────── Export / Import ─────────────────────────
+
+        public void ExportTo(string file)
+        {
+            File.WriteAllText(file, _serializer.Serialize(Bookmarks));
+        }
+
+        /// <summary>Imports bookmarks from a file. Returns the number of bookmarks added. Throws on invalid file.</summary>
+        public int ImportFrom(string file, bool replace)
+        {
+            string json = File.ReadAllText(file);
+            BookmarkItem[] items = _serializer.Deserialize<BookmarkItem[]>(json);
+            if (items == null) throw new InvalidDataException("The file does not contain any bookmarks.");
+
+            if (replace) Bookmarks.Clear();
+
+            // Skip exact duplicates (same path at top level) when merging
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var b in Bookmarks)
+            {
+                if (b != null && !b.IsFolder && !string.IsNullOrEmpty(b.Path)) existing.Add(b.Path);
+            }
+
+            int added = 0;
+            foreach (var item in items)
+            {
+                if (item == null) continue;
+                if (string.IsNullOrEmpty(item.Id)) item.Id = Guid.NewGuid().ToString();
+                if (item.Children == null) item.Children = new List<BookmarkItem>();
+
+                if (item.IsFolder)
+                {
+                    // Merge into an existing folder with the same name instead of duplicating it
+                    BookmarkItem target = null;
+                    foreach (var g in GetGroups())
+                    {
+                        if (string.Equals(g.Name, item.Name, StringComparison.OrdinalIgnoreCase)) { target = g; break; }
+                    }
+                    if (target == null)
+                    {
+                        Bookmarks.Add(item);
+                        added += item.Children.Count;
+                        continue;
+                    }
+                    if (target.Children == null) target.Children = new List<BookmarkItem>();
+                    foreach (var child in item.Children)
+                    {
+                        if (child == null) continue;
+                        bool dup = false;
+                        foreach (var c in target.Children)
+                        {
+                            if (c != null && string.Equals(c.Path, child.Path, StringComparison.OrdinalIgnoreCase)) { dup = true; break; }
+                        }
+                        if (dup) continue;
+                        target.Children.Add(child);
+                        added++;
+                    }
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(item.Path) && existing.Contains(item.Path)) continue;
+                Bookmarks.Add(item);
+                existing.Add(item.Path ?? string.Empty);
+                added++;
+            }
+
+            if (Bookmarks.Count == 0)
+            {
+                AddDefaultBookmarks();
+            }
+            else
+            {
+                SaveBookmarks();
+            }
+            return added;
         }
 
         public void MoveBookmark(int oldIndex, int newIndex)

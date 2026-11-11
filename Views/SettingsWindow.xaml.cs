@@ -97,8 +97,11 @@ namespace ExplorerBookmarkBar.Views
                 ItemPadding = _manager.Settings.ItemPadding,
                 AutoHideWhenInactive = _manager.Settings.AutoHideWhenInactive,
                 StartWithWindows = _manager.Settings.StartWithWindows,
-                UseAutoLayout = _manager.Settings.UseAutoLayout
+                UseAutoLayout = _manager.Settings.UseAutoLayout,
+                EnableNumberShortcuts = _manager.Settings.EnableNumberShortcuts
             };
+
+            ChkNumberShortcuts.IsChecked = _manager.Settings.EnableNumberShortcuts;
 
             // Set UI values
             SliderBarHeight.Value = _manager.Settings.BarHeight;
@@ -151,6 +154,7 @@ namespace ExplorerBookmarkBar.Views
             _manager.Settings.LeftMargin = 0;
             _manager.Settings.RightMargin = 0;
             _manager.Settings.StartWithWindows = ChkAutoStart.IsChecked == true;
+            _manager.Settings.EnableNumberShortcuts = ChkNumberShortcuts.IsChecked == true;
 
             Win32Helper.SetAutoStart(_manager.Settings.StartWithWindows);
             _manager.SaveSettings();
@@ -176,11 +180,63 @@ namespace ExplorerBookmarkBar.Views
             _manager.Settings.LeftMargin = 0;
             _manager.Settings.RightMargin = 0;
             _manager.Settings.StartWithWindows = _backupSettings.StartWithWindows;
+            _manager.Settings.EnableNumberShortcuts = _backupSettings.EnableNumberShortcuts;
 
             Win32Helper.SetAutoStart(_backupSettings.StartWithWindows);
             _manager.SaveSettings();
 
             Close();
+        }
+
+        private void BtnExport_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Export Bookmarks",
+                Filter = "NavShelf bookmarks (*.json)|*.json|All files (*.*)|*.*",
+                FileName = "NavShelf-bookmarks-" + DateTime.Now.ToString("yyyy-MM-dd") + ".json",
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+            };
+            if (dlg.ShowDialog(this) != true) return;
+
+            try
+            {
+                _manager.ExportTo(dlg.FileName);
+                MessageBox.Show(this, "Bookmarks exported to:\n" + dlg.FileName, "Export Bookmarks", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Could not export bookmarks:\n" + ex.Message, "Export Bookmarks", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void BtnImport_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Import Bookmarks",
+                Filter = "NavShelf bookmarks (*.json)|*.json|All files (*.*)|*.*",
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+            };
+            if (dlg.ShowDialog(this) != true) return;
+
+            var choice = MessageBox.Show(this,
+                "How should the imported bookmarks be added?\n\n" +
+                "Yes  —  Merge: keep your current bookmarks and add the new ones\n" +
+                "No   —  Replace: remove your current bookmarks first\n" +
+                "Cancel  —  Don't import",
+                "Import Bookmarks", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (choice == MessageBoxResult.Cancel) return;
+
+            try
+            {
+                int added = _manager.ImportFrom(dlg.FileName, replace: choice == MessageBoxResult.No);
+                MessageBox.Show(this, added + " bookmark" + (added == 1 ? "" : "s") + " imported.", "Import Bookmarks", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "This file could not be imported. Nothing was changed.\n\n" + ex.Message, "Import Bookmarks", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private void BtnReset_Click(object sender, RoutedEventArgs e)

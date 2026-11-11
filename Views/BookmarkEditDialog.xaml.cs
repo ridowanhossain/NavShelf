@@ -35,7 +35,26 @@ namespace ExplorerBookmarkBar.Views
             TxtPath.Text = _targetItem.Path;
             _selectedIconType = string.IsNullOrEmpty(_targetItem.IconType) ? "Folder" : _targetItem.IconType;
 
-            ThemeManager.ThemeChanged += () => Dispatcher.Invoke((Action)BuildIconPicker);
+            if (_targetItem.IsFolder)
+            {
+                // Bookmark folder (group): only a name is needed
+                TxtDialogTitle.Text = _isNew ? "New Bookmark Folder" : "Rename Bookmark Folder";
+                Title = TxtDialogTitle.Text;
+                PathSection.Visibility = Visibility.Collapsed;
+                IconSection.Visibility = Visibility.Collapsed;
+                Height = 200;
+                CenterOnScreen(callerHwnd);
+            }
+
+            Loaded += (s, e) =>
+            {
+                TxtName.Focus();
+                TxtName.SelectAll();
+            };
+
+            Action rebuild = () => Dispatcher.Invoke((Action)BuildIconPicker);
+            ThemeManager.ThemeChanged += rebuild;
+            Closed += (s, e) => ThemeManager.ThemeChanged -= rebuild;
             BuildIconPicker();
         }
 
@@ -201,6 +220,23 @@ namespace ExplorerBookmarkBar.Views
         {
             string name = TxtName.Text.Trim();
             string path = TxtPath.Text.Trim();
+
+            if (_targetItem.IsFolder)
+            {
+                if (string.IsNullOrEmpty(name))
+                {
+                    MessageBox.Show("Please enter a folder name.", "Missing Name", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                _targetItem.Name = name;
+                if (_isNew)
+                {
+                    BookmarkManager.Instance.Bookmarks.Add(_targetItem);
+                }
+                BookmarkManager.Instance.SaveBookmarks();
+                Close();
+                return;
+            }
 
             if (string.IsNullOrEmpty(path))
             {

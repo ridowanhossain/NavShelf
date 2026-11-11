@@ -101,13 +101,16 @@
                                 CornerRadius="8"
                                 Padding="{TemplateBinding Padding}"
                                 SnapsToDevicePixels="True">
-                            <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+                            <ScrollViewer MaxHeight="560" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" Focusable="False">
+                                <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+                            </ScrollViewer>
                         </Border>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
 
+        <!-- MenuItem with nested submenu support (used by folder dropdowns and subfolder browsing) -->
         <Style TargetType="MenuItem">
             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
             <Setter Property="Background" Value="Transparent" />
@@ -117,14 +120,39 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="MenuItem">
-                        <Border x:Name="menuBorder"
-                                Background="{TemplateBinding Background}"
-                                CornerRadius="4"
-                                Padding="{TemplateBinding Padding}"
-                                SnapsToDevicePixels="True">
-                            <ContentPresenter ContentSource="Header" VerticalAlignment="Center" />
-                        </Border>
+                        <Grid SnapsToDevicePixels="True">
+                            <Border x:Name="menuBorder"
+                                    Background="{TemplateBinding Background}"
+                                    CornerRadius="4"
+                                    Padding="{TemplateBinding Padding}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <ContentPresenter ContentSource="Header" VerticalAlignment="Center" RecognizesAccessKey="False" />
+                                    <Path x:Name="SubArrow" Grid.Column="1" Width="5" Height="8" Margin="16,0,0,0"
+                                          Stretch="Fill" VerticalAlignment="Center" Visibility="Collapsed"
+                                          Fill="{DynamicResource TextSecondary}" Data="M0,0 L4,4 L0,8 Z" />
+                                </Grid>
+                            </Border>
+                            <Popup x:Name="PART_Popup"
+                                   Placement="Right" HorizontalOffset="4" VerticalOffset="-5"
+                                   IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                   AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                                <Border Background="{DynamicResource MenuBg}"
+                                        BorderBrush="{DynamicResource MenuBorder}"
+                                        BorderThickness="1" CornerRadius="8" Padding="4">
+                                    <ScrollViewer MaxHeight="560" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" Focusable="False">
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
                         <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="True">
+                                <Setter TargetName="SubArrow" Property="Visibility" Value="Visible" />
+                            </Trigger>
                             <Trigger Property="IsHighlighted" Value="True">
                                 <Setter TargetName="menuBorder" Property="Background" Value="{DynamicResource MenuHover}" />
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
@@ -159,6 +187,8 @@
                           PreviewMouseWheel="ScrollViewer_PreviewMouseWheel"
                           ScrollChanged="BookmarksScrollViewer_ScrollChanged"
                           SizeChanged="BookmarksScrollViewer_SizeChanged"
+                          Background="Transparent"
+                          MouseRightButtonUp="BarBackground_RightClick"
                           Focusable="False">
                 <ItemsControl x:Name="BookmarksItemsControl" SizeChanged="BookmarksItemsControl_SizeChanged">
                     <ItemsControl.ItemsPanel>
@@ -168,11 +198,13 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Grid Margin="{Binding ItemMargin}">
-                                <Button Style="{StaticResource BookmarkChipStyle}"
+                            <Grid x:Name="ChipRoot" Margin="{Binding ItemMargin}">
+                                <Button x:Name="ChipButton"
+                                        Style="{StaticResource BookmarkChipStyle}"
                                         Tag="{Binding}"
                                         Margin="0"
                                         Padding="{Binding ItemPadding}"
+                                        Opacity="{Binding ItemOpacity}"
                                         AllowDrop="True"
                                         Click="BookmarkButton_Click"
                                         PreviewMouseDown="BookmarkButton_PreviewMouseDown"
@@ -182,20 +214,7 @@
                                         DragLeave="BookmarkButton_DragLeave"
                                         Drop="BookmarkButton_Drop"
                                         MouseRightButtonUp="BookmarkButton_RightClick"
-                                        ContextMenuOpening="BookmarkButton_ContextMenuOpening"
-                                        ToolTip="{Binding Path}">
-                                    <Button.ContextMenu>
-                                        <ContextMenu>
-                                            <MenuItem Header="Open in Current Tab" Click="MenuOpenCurrent_Click" />
-                                            <MenuItem Header="Open in New Tab" Click="MenuOpenNewTab_Click" />
-                                            <MenuItem Header="Open in New Window" Click="MenuOpenNewWindow_Click" />
-                                            <Separator Background="{DynamicResource MenuSeparator}" />
-                                            <MenuItem Header="Edit Bookmark..." Click="MenuEdit_Click" />
-                                            <MenuItem Header="Copy Path" Click="MenuCopyPath_Click" />
-                                            <Separator Background="{DynamicResource MenuSeparator}" />
-                                            <MenuItem Header="Delete Bookmark" Click="MenuDelete_Click" />
-                                        </ContextMenu>
-                                    </Button.ContextMenu>
+                                        ToolTip="{Binding ToolTipText}">
                                     <StackPanel Orientation="Horizontal">
                                         <!-- Dynamic Icon -->
                                         <Path Width="13" Height="13" Margin="0,0,6,0" Stretch="Uniform"
@@ -209,8 +228,26 @@
                                                    Foreground="{DynamicResource TextPrimary}"
                                                    TextTrimming="CharacterEllipsis"
                                                    MaxWidth="180" />
+                                        <!-- Folder (group) dropdown arrow: always visible for groups -->
+                                        <Path x:Name="GroupChevron" Width="7" Height="4" Margin="5,1,0,0" Stretch="Fill"
+                                              VerticalAlignment="Center" Visibility="Collapsed"
+                                              Fill="{DynamicResource TextSecondary}" Data="M0,0 L8,0 L4,4 Z" />
                                     </StackPanel>
                                 </Button>
+
+                                <!-- Subfolder browse arrow: sits inside the chip's right padding, appears on hover -->
+                                <Border x:Name="SubfolderChevron"
+                                        Width="10" HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                                        Margin="0,3,1,3" CornerRadius="3"
+                                        Background="Transparent" Cursor="Hand"
+                                        Tag="{Binding}"
+                                        Visibility="{Binding ChevronVisibility}"
+                                        Opacity="0"
+                                        ToolTip="Browse subfolders"
+                                        PreviewMouseLeftButtonDown="SubfolderChevron_MouseDown">
+                                    <Path Width="7" Height="4" Stretch="Fill" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                          Fill="{DynamicResource TextSecondary}" Data="M0,0 L8,0 L4,4 Z" />
+                                </Border>
 
                                 <!-- Drop Indicator: Left Vertical Line -->
                                 <Border Width="2.5" CornerRadius="1"
@@ -230,6 +267,21 @@
                                         Visibility="{Binding DropIndicatorRightVisibility}"
                                         IsHitTestVisible="False" />
                             </Grid>
+                            <DataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                    <Setter TargetName="GroupChevron" Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                                <Trigger SourceName="ChipRoot" Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="SubfolderChevron" Property="Opacity" Value="1" />
+                                </Trigger>
+                                <Trigger SourceName="SubfolderChevron" Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="SubfolderChevron" Property="Background" Value="{DynamicResource ItemPressedBackground}" />
+                                </Trigger>
+                                <DataTrigger Binding="{Binding IsDropTarget}" Value="True">
+                                    <Setter TargetName="ChipButton" Property="BorderBrush" Value="{DynamicResource AccentBlue}" />
+                                    <Setter TargetName="ChipButton" Property="Background" Value="{DynamicResource ItemHoverBackground}" />
+                                </DataTrigger>
+                            </DataTemplate.Triggers>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

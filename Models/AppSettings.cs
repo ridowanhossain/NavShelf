@@ -16,6 +16,7 @@ namespace ExplorerBookmarkBar.Models
         public int ItemPadding { get; set; }
         public string Theme { get; set; } // "Dark", "Light", "Fluent"
         public bool UseAutoLayout { get; set; }
+        public bool EnableNumberShortcuts { get; set; } // Alt+1..9 opens bookmark N in Explorer / file dialogs
 
         public AppSettings()
         {
@@ -31,6 +32,7 @@ namespace ExplorerBookmarkBar.Models
             ItemPadding = 8;
             Theme = "Dark";
             UseAutoLayout = true;
+            EnableNumberShortcuts = true;
         }
     }
 }

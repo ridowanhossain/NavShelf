@@ -86,6 +86,9 @@ namespace ExplorerBookmarkBar
                 Log("Setting up Global Hotkey...");
                 SetupGlobalHotkey();
 
+                Log("Starting Alt+1..9 bookmark shortcuts...");
+                KeyboardShortcutService.Instance.Start();
+
                 Log("Application started successfully and running in background.");
             }
             catch (Exception ex)
@@ -215,6 +218,7 @@ namespace ExplorerBookmarkBar
             Log("ExitApplication called.");
             try
             {
+                KeyboardShortcutService.Instance.Stop();
                 ExplorerChildBarManager.Instance.Stop();
 
                 if (_hotkeyHwndSource != null)

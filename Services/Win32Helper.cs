@@ -336,6 +336,106 @@ namespace ExplorerBookmarkBar.Services
         [DllImport("user32.dll")]
         public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
 
+        // ───────────── Shell file copy/move (Windows progress + conflict dialogs, Ctrl+Z undo) ─────────────
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct SHFILEOPSTRUCT
+        {
+            public IntPtr hwnd;
+            public uint wFunc;
+            public string pFrom;
+            public string pTo;
+            public ushort fFlags;
+            [MarshalAs(UnmanagedType.Bool)] public bool fAnyOperationsAborted;
+            public IntPtr hNameMappings;
+            public string lpszProgressTitle;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
+
+        private const uint FO_MOVE = 0x0001;
+        private const uint FO_COPY = 0x0002;
+        private const ushort FOF_ALLOWUNDO = 0x0040;
+        private const ushort FOF_NOCONFIRMMKDIR = 0x0200;
+
+        /// <summary>
+        /// Copies or moves files/folders into destDir using the Windows shell, on a background thread so the
+        /// bookmark bar stays responsive. Windows shows its own progress, "replace or skip" and error dialogs.
+        /// </summary>
+        public static void ShellTransfer(IntPtr owner, string[] sources, string destDir, bool move)
+        {
+            if (sources == null || sources.Length == 0 || string.IsNullOrEmpty(destDir)) return;
+
+            string from = string.Join("\0", sources) + "\0\0";
+            string to = destDir + "\0\0";
+
+            var t = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    var op = new SHFILEOPSTRUCT
+                    {
+                        hwnd = owner,
+                        wFunc = move ? FO_MOVE : FO_COPY,
+                        pFrom = from,
+                        pTo = to,
+                        fFlags = (ushort)(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)
+                    };
+                    int rc = SHFileOperation(ref op);
+                    if (rc != 0 && !op.fAnyOperationsAborted)
+                    {
+                        App.Log("ShellTransfer failed with code 0x" + rc.ToString("X"));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    App.Log("ShellTransfer error: " + ex.Message);
+                }
+            });
+            t.SetApartmentState(System.Threading.ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+        public static extern int StrCmpLogicalW(string psz1, string psz2);
+
+        // ───────────── Low-level keyboard hook (Alt+1..9 bookmark shortcuts) ─────────────
+
+        public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KBDLLHOOKSTRUCT
+        {
+            public uint vkCode;
+            public uint scanCode;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        public const int WH_KEYBOARD_LL = 13;
+        public const int WM_SYSKEYDOWN = 0x0104;
+        public const uint LLKHF_ALTDOWN = 0x20;
+        public const uint LLKHF_INJECTED = 0x10;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
         public const uint RDW_INVALIDATE = 0x0001;
         public const uint RDW_ERASE = 0x0004;
         public const uint RDW_ALLCHILDREN = 0x0080;

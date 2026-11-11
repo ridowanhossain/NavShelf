@@ -60,6 +60,7 @@
     <Compile Include="Services\ExplorerHookEngine.cs" />
     <Compile Include="Services\ExplorerChildBarManager.cs" />
     <Compile Include="Services\ThemeManager.cs" />
+    <Compile Include="Services\KeyboardShortcutService.cs" />
     <Compile Include="Views\BookmarkBarControl.xaml.cs">
       <DependentUpon>BookmarkBarControl.xaml</DependentUpon>
     </Compile>

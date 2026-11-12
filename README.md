@@ -5,11 +5,11 @@
 **The fastest way to access your favourite folders in Windows 11 & 10 File Explorer.**  
 Pin folders to a Chrome-style bookmark bar, open them in new tabs with middle-click, and never dig through the sidebar again.
 
-[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.1.1-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
+[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.2.0-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows)](https://navshelf.nexonic.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 [![.NET Framework](https://img.shields.io/badge/.NET_Framework-4.8-512BD4?style=for-the-badge&logo=dotnet)](https://dotnet.microsoft.com/)
-[![Size](https://img.shields.io/badge/Size-~160%20KB-f59e0b?style=for-the-badge)](https://navshelf.nexonic.dev/)
+[![Size](https://img.shields.io/badge/Size-~180%20KB-f59e0b?style=for-the-badge)](https://navshelf.nexonic.dev/)
 
 🌐 **Website:** [navshelf.nexonic.dev](https://navshelf.nexonic.dev/) &nbsp;|&nbsp; ⭐ **Star this repo if you find it useful!**
 
@@ -37,7 +37,7 @@ NavShelf is a free, open-source Windows utility that adds a **horizontal bookmar
 | 📂 **Open & Save Dialog Support** | Works inside file dialogs in VS Code, Photoshop, Chrome, and every other Windows app. |
 | 😀 **Emoji & Custom Icons** | Give each bookmark a custom icon (folder, code, music, star…) and emoji prefix. |
 | ⌨️ **Global Hotkey** | Press `Ctrl + Shift + B` from anywhere to toggle the bar. |
-| 🪶 **Ultra Lightweight & Portable** | Single ~160 KB `.exe`. No installer, no admin rights, no registry edits needed. |
+| 🪶 **Ultra Lightweight & Portable** | Single ~180 KB `.exe`. No installer, no admin rights, no registry edits needed. |
 | 🛡️ **100% Safe** | Uses the official Win32 `SetParent` API. Zero DLL injection, zero system file patches. |
 | 💻 **System Tray & Auto-Startup** | Runs quietly in the tray with an optional "Launch on Windows Startup" setting. |
 | 🗂️ **Bookmark Folders** | Group bookmarks into Chrome-style folders that open as a dropdown menu. |
@@ -52,7 +52,7 @@ NavShelf is a free, open-source Windows utility that adds a **horizontal bookmar
 
 ## 🚀 Quick Start
 
-1. **[Download NavShelf.exe](https://navshelf.nexonic.dev/)** (~160 KB)
+1. **[Download NavShelf.exe](https://navshelf.nexonic.dev/)** (~180 KB)
 2. **Double-click** `NavShelf.exe` — no install, no UAC prompt.
 3. **Open Windows File Explorer** — the bookmark bar appears automatically beneath the tabs.
 4. **Drag any folder** onto the bar to pin it, or right-click a bookmark to edit, rename, or remove it.
@@ -135,6 +135,16 @@ NavShelf also protects your bookmarks on its own. Every save goes to a temporary
 
 ## 🆕 What's New
 
+### v1.2.0
+**New features & performance**
+- ⚡ **Instant folder cache & background sync**: Bookmark subfolder menus and nested hover submenus now open instantaneously from a persistent in-memory folder index (`folder_cache.json`), with background `FileSystemWatcher` updates and silent background refresh so menus stay up to date without waiting on disk scans.
+- 🚀 **Instant bar & ▾ dropdown readiness**: Explorer bookmark bars attach faster and show subfolder **▾** arrows immediately, running local folder checks in parallel while keeping slow or offline network drives isolated.
+- 🎨 **Modern Windows 11 Fluent dropdown scrollbar**: Replaced the classic scrollbar inside long dropdown menus and nested submenus with a sleek rounded pill scrollbar that subtly widens on hover/drag and syncs with Dark & Light themes.
+
+**Fixes**
+- Fixed a focus conflict when opening subfolder dropdowns inside active Windows 11 File Explorer windows that could cause the menu to close immediately after opening.
+- Prevented slow or disconnected network drives from stalling local folder cache warm-up or cluttering `folder_cache.json`.
+
 ### v1.1.1
 - 🔽 The subfolder **▾** next to each bookmark is now larger, always faintly visible, and has its own click area, so it no longer overlaps the bookmark name. It brightens when you hover the bookmark. The dropdown arrow on bookmark folders is larger too.
 
@@ -160,7 +170,7 @@ NavShelf also protects your bookmarks on its own. Every save goes to a temporary
 - **OS:** Windows 10 (1809+) or Windows 11 (22H2 / 23H2 / 24H2+)
 - **Runtime:** .NET Framework 4.8 *(pre-installed on all modern Windows)*
 - **Language:** C# + WPF + Win32 Interop
-- **Size:** ~160 KB (single portable `.exe`)
+- **Size:** ~180 KB (single portable `.exe`)
 
 ---
 
@@ -180,6 +190,7 @@ NavShelf/
 │   ├── ExplorerChildBarManager.cs  # Win32 WS_CHILD window attachment & layout
 │   ├── ExplorerComHelper.cs        # Shell COM navigation (tabs, windows, dialogs)
 │   ├── ExplorerHookEngine.cs       # Window tracking & shell hooks
+│   ├── FolderCacheService.cs       # Persistent folder index, live watchers & background sync
 │   ├── KeyboardShortcutService.cs  # Alt+1..9 shortcuts (active only in Explorer / file dialogs)
 │   ├── ThemeManager.cs             # Live Windows Dark/Light theme sync
 │   └── Win32Helper.cs              # Win32 API declarations, shell copy/move & utilities

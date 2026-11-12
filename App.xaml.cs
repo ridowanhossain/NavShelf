@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -24,19 +25,23 @@ namespace ExplorerBookmarkBar
         private NotifyIcon _trayIcon;
         private HwndSource _hotkeyHwndSource;
         private static string _logFile;
+        private static readonly object _logLock = new object();
 
         public static void Log(string msg)
         {
             try
             {
-                if (string.IsNullOrEmpty(_logFile))
+                lock (_logLock)
                 {
-                    string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                    string dir = Path.Combine(appData, "ExplorerBookmarkBar");
-                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                    _logFile = Path.Combine(dir, "app.log");
+                    if (string.IsNullOrEmpty(_logFile))
+                    {
+                        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                        string dir = Path.Combine(appData, "ExplorerBookmarkBar");
+                        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                        _logFile = Path.Combine(dir, "app.log");
+                    }
+                    File.AppendAllText(_logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine);
                 }
-                File.AppendAllText(_logFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine);
             }
             catch { }
         }
@@ -76,6 +81,23 @@ namespace ExplorerBookmarkBar
             {
                 Log("Initializing BookmarkManager...");
                 var manager = BookmarkManager.Instance;
+
+                Log("Initializing Everything-style Folder Cache...");
+                var cacheService = FolderCacheService.Instance;
+                var allPaths = new List<string>();
+                foreach (var b in manager.Bookmarks)
+                {
+                    if (b == null) continue;
+                    if (!string.IsNullOrEmpty(b.Path)) allPaths.Add(b.Path);
+                    if (b.Children != null)
+                    {
+                        foreach (var c in b.Children)
+                        {
+                            if (c != null && !string.IsNullOrEmpty(c.Path)) allPaths.Add(c.Path);
+                        }
+                    }
+                }
+                cacheService.WarmUpAsync(allPaths);
 
                 Log("Starting Native Child Bar Manager...");
                 ExplorerChildBarManager.Instance.Start();
@@ -218,6 +240,7 @@ namespace ExplorerBookmarkBar
             Log("ExitApplication called.");
             try
             {
+                FolderCacheService.Instance.FlushToDisk();
                 KeyboardShortcutService.Instance.Stop();
                 ExplorerChildBarManager.Instance.Stop();
 

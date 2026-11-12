@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -34,6 +33,8 @@ namespace ExplorerBookmarkBar.Views
         private readonly Action<bool> _modalStateHandler;
         private readonly DispatcherTimer _missingCheckTimer;
         private bool _missingCheckRunning;
+        private int _missingCheckRunningGen = -1;
+        private int _refreshGeneration;
         private bool _detached;
 
         public BookmarkBarControl(IntPtr explorerHwnd)
@@ -67,9 +68,9 @@ namespace ExplorerBookmarkBar.Views
             _missingCheckTimer.Tick += (s, e) => StartMissingCheck();
             _missingCheckTimer.Start();
 
+            ApplySettings(false);
+            ApplyTheme(false);
             RefreshDisplayItems();
-            ApplySettings();
-            ApplyTheme();
             Loaded += (s, e) => UpdateOverflowVisibility();
         }
 
@@ -105,6 +106,11 @@ namespace ExplorerBookmarkBar.Views
 
         public void ApplyTheme()
         {
+            ApplyTheme(true);
+        }
+
+        private void ApplyTheme(bool refresh)
+        {
             Dispatcher.Invoke((Action)(() =>
             {
                 try
@@ -121,7 +127,7 @@ namespace ExplorerBookmarkBar.Views
                             MainBorder.BorderBrush = (Brush)app.Resources["BarBorder"];
                         }
                     }
-                    RefreshDisplayItems();
+                    if (refresh) RefreshDisplayItems();
                     UpdateLayout();
                 }
                 catch { }
@@ -135,11 +141,16 @@ namespace ExplorerBookmarkBar.Views
 
         private void ApplySettings()
         {
+            ApplySettings(true);
+        }
+
+        private void ApplySettings(bool refresh)
+        {
             MainBorder.Margin = new Thickness(0);
             MainBorder.CornerRadius = new CornerRadius(0);
             MainBorder.BorderThickness = new Thickness(0, 0, 0, 1);
 
-            RefreshDisplayItems();
+            if (refresh) RefreshDisplayItems();
         }
 
         // ═════════════════════════════ Display items ═════════════════════════════
@@ -147,6 +158,7 @@ namespace ExplorerBookmarkBar.Views
         private void RefreshDisplayItems()
         {
             if (_detached) return;
+            _refreshGeneration++;
 
             var s = _manager.Settings;
             var margin = new Thickness(s.ItemSpacing, 1, s.ItemSpacing, 1);
@@ -183,8 +195,11 @@ namespace ExplorerBookmarkBar.Views
                 {
                     bool wasMissing, wasDir;
                     if (previousMissing.TryGetValue(b.Path, out wasMissing)) item.IsMissing = wasMissing;
-                    if (IsThisPc(b.Path))
+                    if (IsThisPc(b.Path) || IsFileSystemPath(b.Path))
                     {
+                        // Show subfolder dropdown ▾ immediately (0ms) on explorer open instead of
+                        // waiting 2-3s for StartMissingCheck over network drives! StartMissingCheck
+                        // will hide it later only if the path turns out to be a file or missing.
                         item.ChevronVisibility = Visibility.Visible;
                     }
                     else if (previousIsDir.TryGetValue(b.Path, out wasDir) && wasDir)
@@ -214,11 +229,13 @@ namespace ExplorerBookmarkBar.Views
 
         /// <summary>
         /// Checks in the background whether each bookmarked folder still exists, then dims missing
-        /// ones and enables the subfolder ▾ for real folders. Never blocks the UI (slow network drives).
+        /// ones and enables the subfolder ▾ for real folders. Local paths check in parallel first
+        /// so slow/offline network shares never delay local bookmarks.
         /// </summary>
         private void StartMissingCheck()
         {
-            if (_detached || _missingCheckRunning || !IsVisible && IsLoaded) return;
+            int gen = _refreshGeneration;
+            if (_detached || (!IsVisible && IsLoaded) || (_missingCheckRunning && _missingCheckRunningGen == gen)) return;
 
             var targets = new List<BookmarkDisplayItem>();
             foreach (var d in _displayItems)
@@ -227,41 +244,107 @@ namespace ExplorerBookmarkBar.Views
             }
             if (targets.Count == 0) return;
 
-            var paths = targets.Select(t => t.Path).ToList();
-            _missingCheckRunning = true;
+            var localIndices = new List<int>();
+            var networkIndices = new List<int>();
+            var paths = new string[targets.Count];
+            for (int i = 0; i < targets.Count; i++)
+            {
+                paths[i] = targets[i].Path;
+                if (FolderCacheService.Instance.IsSlowOrNetworkPath(paths[i]))
+                    networkIndices.Add(i);
+                else
+                    localIndices.Add(i);
+            }
 
-            Task.Factory.StartNew(() =>
+            _missingCheckRunning = true;
+            _missingCheckRunningGen = gen;
+            var uiScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+
+            Task.Run(() =>
             {
-                var results = new List<int>(); // 0 = missing, 1 = file, 2 = directory
-                foreach (var p in paths)
+                try
                 {
-                    int state = 0;
-                    try
+                    if (localIndices.Count > 0)
                     {
-                        if (Directory.Exists(p)) state = 2;
-                        else if (File.Exists(p)) state = 1;
+                        var localResults = new int[localIndices.Count];
+                        Parallel.For(0, localIndices.Count, new ParallelOptions { MaxDegreeOfParallelism = 4 }, idx =>
+                        {
+                            string p = paths[localIndices[idx]];
+                            int state = 0;
+                            try
+                            {
+                                if (Directory.Exists(p)) state = 2;
+                                else if (File.Exists(p)) state = 1;
+                            }
+                            catch { }
+                            localResults[idx] = state;
+                        });
+
+                        Task.Factory.StartNew(() =>
+                        {
+                            if (_detached || gen != _refreshGeneration) return;
+                            for (int k = 0; k < localIndices.Count; k++)
+                            {
+                                int tIdx = localIndices[k];
+                                int state = localResults[k];
+                                targets[tIdx].IsMissing = state == 0;
+                                targets[tIdx].ChevronVisibility = state == 2 ? Visibility.Visible : Visibility.Collapsed;
+                            }
+                        }, System.Threading.CancellationToken.None, TaskCreationOptions.None, uiScheduler);
                     }
-                    catch { }
-                    results.Add(state);
+
+                    if (networkIndices.Count > 0)
+                    {
+                        var netResults = new int[networkIndices.Count];
+                        Parallel.For(0, networkIndices.Count, new ParallelOptions { MaxDegreeOfParallelism = 2 }, idx =>
+                        {
+                            string p = paths[networkIndices[idx]];
+                            int state = 2; // Assume folder if slow/unreachable until proven file/missing
+                            try
+                            {
+                                if (Directory.Exists(p)) state = 2;
+                                else if (File.Exists(p)) state = 1;
+                                else if (FolderCacheService.Instance.TryGetFromCache(p) != null) state = 2;
+                                else state = 0;
+                            }
+                            catch { }
+                            netResults[idx] = state;
+                        });
+
+                        Task.Factory.StartNew(() =>
+                        {
+                            if (_detached || gen != _refreshGeneration) return;
+                            for (int k = 0; k < networkIndices.Count; k++)
+                            {
+                                int tIdx = networkIndices[k];
+                                int state = netResults[k];
+                                targets[tIdx].IsMissing = state == 0;
+                                targets[tIdx].ChevronVisibility = state == 2 ? Visibility.Visible : Visibility.Collapsed;
+                            }
+                        }, System.Threading.CancellationToken.None, TaskCreationOptions.None, uiScheduler);
+                    }
                 }
-                return results;
-            }).ContinueWith(task =>
-            {
-                _missingCheckRunning = false;
-                if (_detached || task.IsFaulted) return;
-                var results = task.Result;
-                for (int i = 0; i < targets.Count && i < results.Count; i++)
+                finally
                 {
-                    targets[i].IsMissing = results[i] == 0;
-                    targets[i].ChevronVisibility = results[i] == 2 ? Visibility.Visible : Visibility.Collapsed;
+                    Task.Factory.StartNew(() =>
+                    {
+                        if (_missingCheckRunningGen == gen) _missingCheckRunning = false;
+                    }, System.Threading.CancellationToken.None, TaskCreationOptions.None, uiScheduler);
                 }
-            }, TaskScheduler.FromCurrentSynchronizationContext());
+            });
         }
+
+        private static readonly Dictionary<string, Geometry> _geometryCache = new Dictionary<string, Geometry>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, Brush> _brushCache = new Dictionary<string, Brush>(StringComparer.Ordinal);
 
         private Geometry GetGeometryForType(string type)
         {
+            string key = type ?? "Folder";
+            Geometry cached;
+            if (_geometryCache.TryGetValue(key, out cached)) return cached;
+
             string pathData;
-            switch (type)
+            switch (key)
             {
                 case "Group":
                     pathData = "M22,4H14L12,2H6A2,2 0 0,0 4,4V16A2,2 0 0,0 6,18H22A2,2 0 0,0 24,16V6A2,2 0 0,0 22,4M2,6H0V11H0V20A2,2 0 0,0 2,22H20V20H2V6Z";
@@ -297,52 +380,58 @@ namespace ExplorerBookmarkBar.Views
                     pathData = "M10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6H12L10,4Z";
                     break;
             }
+            Geometry geo;
             try
             {
-                return Geometry.Parse(pathData);
+                geo = Geometry.Parse(pathData);
             }
             catch
             {
-                return Geometry.Parse("M10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6H12L10,4Z");
+                geo = Geometry.Parse("M10,4H4C2.89,4 2,4.89 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8C22,6.89 21.1,6 20,6H12L10,4Z");
             }
+            if (geo.CanFreeze) geo.Freeze();
+            _geometryCache[key] = geo;
+            return geo;
         }
 
         private Brush GetBrushForType(string type, string customColor)
         {
+            string key = !string.IsNullOrEmpty(customColor) ? "C:" + customColor : (type ?? "Folder");
+            Brush cached;
+            if (_brushCache.TryGetValue(key, out cached)) return cached;
+
+            Brush brush = null;
             if (!string.IsNullOrEmpty(customColor))
             {
                 try
                 {
-                    return (Brush)new BrushConverter().ConvertFromString(customColor);
+                    brush = (Brush)new BrushConverter().ConvertFromString(customColor);
                 }
                 catch { }
             }
 
-            switch (type)
+            if (brush == null)
             {
-                case "Group":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFA726"));
-                case "Drive":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CC2FF"));
-                case "Download":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#6CCB5F"));
-                case "Document":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#29B6F6"));
-                case "Desktop":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#AB47BC"));
-                case "Star":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFD54F"));
-                case "Code":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#00E676"));
-                case "Image":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF7043"));
-                case "Music":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EC407A"));
-                case "Video":
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF5252"));
-                default: // Folder
-                    return new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFCA28"));
+                string hex;
+                switch (type)
+                {
+                    case "Group": hex = "#FFA726"; break;
+                    case "Drive": hex = "#4CC2FF"; break;
+                    case "Download": hex = "#6CCB5F"; break;
+                    case "Document": hex = "#29B6F6"; break;
+                    case "Desktop": hex = "#AB47BC"; break;
+                    case "Star": hex = "#FFD54F"; break;
+                    case "Code": hex = "#00E676"; break;
+                    case "Image": hex = "#FF7043"; break;
+                    case "Music": hex = "#EC407A"; break;
+                    case "Video": hex = "#FF5252"; break;
+                    default: hex = "#FFCA28"; break;
+                }
+                brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
             }
+            if (brush.CanFreeze) brush.Freeze();
+            _brushCache[key] = brush;
+            return brush;
         }
 
         private bool CheckModalBlocking()
@@ -512,7 +601,7 @@ namespace ExplorerBookmarkBar.Views
             OpenPath(item.Path, ModeFromModifiers());
         }
 
-        private void SubfolderChevron_MouseDown(object sender, MouseButtonEventArgs e)
+        private void SubfolderChevron_Click(object sender, RoutedEventArgs e)
         {
             e.Handled = true;
             if (CheckModalBlocking()) return;
@@ -522,8 +611,22 @@ namespace ExplorerBookmarkBar.Views
             if (item == null || item.IsGroup) return;
 
             var menu = CreateMenu(el);
-            PopulateSubfolders(menu.Items, item.Path, menu);
-            menu.IsOpen = true;
+
+            // Everything-style instant cache hit check
+            var cached = FolderCacheService.Instance.TryGetFromCache(item.Path);
+            if (cached != null)
+            {
+                FillSubfolderItems(menu.Items, cached.SubFolders, cached.TotalCount, menu, 0);
+                menu.IsOpen = true;
+                FolderCacheService.Instance.RefreshInBackgroundIfStale(item.Path);
+            }
+            else
+            {
+                var loading = MakeInfoItem("Loading...");
+                menu.Items.Add(loading);
+                menu.IsOpen = true;
+                PopulateSubfoldersAsync(menu.Items, item.Path, menu, loading);
+            }
         }
 
         private void BookmarkButton_RightClick(object sender, MouseButtonEventArgs e)
@@ -682,99 +785,14 @@ namespace ExplorerBookmarkBar.Views
 
         // ═════════════════════════════ Subfolder browsing ═════════════════════════════
 
-        private class SubFolder
-        {
-            public string Name;
-            public string FullPath;
-            public bool HasChildren;
-            public bool IsDrive;
-        }
-
-        private const int MaxSubfolders = 300;
-
         /// <summary>
-        /// Lists subfolders (or drives, for This PC) without hanging the UI on slow/offline drives.
-        /// Returns null if the folder did not respond in time.
+        /// Populates menu items from cached subfolder results on the UI thread.
+        /// Child submenus use a single lazy placeholder populated on MouseEnter (~395ms before
+        /// Windows MenuShowDelay opens the submenu) so opening even huge folder trees stays <10ms.
         /// </summary>
-        private static List<SubFolder> ListSubfolders(string path, out int totalCount)
+        private void FillSubfolderItems(ItemCollection items, List<CachedFolderItem> folders, int total, ContextMenu root, int depth = 0)
         {
-            totalCount = 0;
-            var task = Task.Factory.StartNew(() =>
-            {
-                var list = new List<SubFolder>();
-                int total = 0;
-                if (IsThisPc(path))
-                {
-                    foreach (var drive in DriveInfo.GetDrives())
-                    {
-                        string letter = drive.Name.TrimEnd('\\');
-                        string label = "";
-                        try { if (drive.IsReady) label = drive.VolumeLabel; } catch { }
-                        if (string.IsNullOrEmpty(label))
-                        {
-                            label = drive.DriveType == DriveType.Removable ? "USB Drive"
-                                  : drive.DriveType == DriveType.Network ? "Network Drive"
-                                  : drive.DriveType == DriveType.CDRom ? "DVD Drive" : "Local Disk";
-                        }
-                        list.Add(new SubFolder { Name = label + " (" + letter + ")", FullPath = drive.Name, HasChildren = true, IsDrive = true });
-                    }
-                    return Tuple.Create(list, list.Count);
-                }
-
-                var di = new DirectoryInfo(path);
-                var dirs = new List<DirectoryInfo>();
-                foreach (var d in di.EnumerateDirectories())
-                {
-                    try
-                    {
-                        if ((d.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0) continue;
-                    }
-                    catch { continue; }
-                    total++;
-                    dirs.Add(d);
-                }
-                dirs.Sort((a, b) => Win32Helper.StrCmpLogicalW(a.Name, b.Name));
-                if (dirs.Count > MaxSubfolders) dirs.RemoveRange(MaxSubfolders, dirs.Count - MaxSubfolders);
-
-                // Peek one level deeper (time-boxed) so leaf folders don't show a submenu arrow
-                var sw = Stopwatch.StartNew();
-                foreach (var d in dirs)
-                {
-                    bool hasChildren = true;
-                    if (sw.ElapsedMilliseconds < 700)
-                    {
-                        try { hasChildren = d.EnumerateDirectories().Any(x => (x.Attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0); }
-                        catch { hasChildren = false; }
-                    }
-                    list.Add(new SubFolder { Name = d.Name, FullPath = d.FullName, HasChildren = hasChildren });
-                }
-                return Tuple.Create(list, total);
-            });
-
-            try
-            {
-                if (!task.Wait(2000)) return null;
-                totalCount = task.Result.Item2;
-                return task.Result.Item1;
-            }
-            catch (AggregateException ex)
-            {
-                App.Log("ListSubfolders failed for " + path + ": " + (ex.InnerException != null ? ex.InnerException.Message : ex.Message));
-                return new List<SubFolder>();
-            }
-        }
-
-        /// <summary>Fills a menu with the subfolders of a path. Deeper levels load when hovered.</summary>
-        private void PopulateSubfolders(ItemCollection items, string path, ContextMenu root)
-        {
-            int total;
-            var folders = ListSubfolders(path, out total);
-            if (folders == null)
-            {
-                items.Add(MakeInfoItem("(Folder is not responding)"));
-                return;
-            }
-            if (folders.Count == 0)
+            if (folders == null || folders.Count == 0)
             {
                 items.Add(MakeInfoItem("(No subfolders)"));
                 return;
@@ -795,15 +813,32 @@ namespace ExplorerBookmarkBar.Views
 
                 if (folder.HasChildren)
                 {
-                    mi.Items.Add(MakeInfoItem("Loading..."));
-                    bool loaded = false;
-                    mi.SubmenuOpened += (s, e) =>
+                    var childCached = FolderCacheService.Instance.TryGetFromCache(folder.FullPath);
+                    if (childCached != null && childCached.SubFolders.Count == 0)
                     {
-                        if (e.OriginalSource != mi || loaded) return;
-                        loaded = true;
-                        mi.Items.Clear();
-                        PopulateSubfolders(mi.Items, folder.FullPath, root);
-                    };
+                        // Cached as empty: still show (No subfolders) lazily only if user hovers, or skip empty submenu arrow.
+                        // Keep consistent empty submenu feedback only on hover without eagerly building nested trees:
+                        mi.Items.Add(MakeInfoItem("(No subfolders)"));
+                    }
+                    else
+                    {
+                        var loadingItem = MakeInfoItem("Loading...");
+                        mi.Items.Add(loadingItem);
+                        bool loaded = false;
+                        Action triggerLoad = () =>
+                        {
+                            if (loaded) return;
+                            loaded = true;
+                            PopulateSubfoldersAsync(mi.Items, folder.FullPath, root, loadingItem);
+                        };
+                        // Preload as soon as mouse enters (400ms before MenuShowDelay opens the popup)
+                        mi.MouseEnter += (s, e) => triggerLoad();
+                        mi.SubmenuOpened += (s, e) =>
+                        {
+                            if (e.OriginalSource != mi) return;
+                            triggerLoad();
+                        };
+                    }
                 }
                 items.Add(mi);
             }
@@ -812,6 +847,46 @@ namespace ExplorerBookmarkBar.Views
             {
                 items.Add(MakeInfoItem("… " + (total - folders.Count) + " more (open the folder to see all)"));
             }
+
+            // Silently prefetch immediate local children in background so hovering any item opens in 0ms
+            FolderCacheService.Instance.PrefetchChildrenAsync(folders);
+        }
+
+        /// <summary>
+        /// Fills a menu with the subfolders of a path asynchronously using Everything-style cache.
+        /// Never clears Items to 0 while a submenu popup is open (removes placeholder after adding real items).
+        /// </summary>
+        private void PopulateSubfoldersAsync(ItemCollection items, string path, ContextMenu root, MenuItem loadingPlaceholder = null)
+        {
+            var cached = FolderCacheService.Instance.TryGetFromCache(path);
+            if (cached != null)
+            {
+                FillSubfolderItems(items, cached.SubFolders, cached.TotalCount, root, 1);
+                if (loadingPlaceholder != null) items.Remove(loadingPlaceholder);
+                FolderCacheService.Instance.RefreshInBackgroundIfStale(path);
+                return;
+            }
+
+            if (loadingPlaceholder == null)
+            {
+                loadingPlaceholder = MakeInfoItem("Loading...");
+                items.Add(loadingPlaceholder);
+            }
+
+            FolderCacheService.Instance.GetSubfoldersAsync(path, forceRefresh: false).ContinueWith(task =>
+            {
+                if (_detached) return;
+                if (task.IsFaulted || task.Result == null)
+                {
+                    App.Log("GetSubfoldersAsync failed for " + path + ": " + (task.Exception != null ? task.Exception.Message : "Unknown"));
+                    items.Add(MakeInfoItem("(Folder is not responding)"));
+                    items.Remove(loadingPlaceholder);
+                    return;
+                }
+                var result = task.Result;
+                FillSubfolderItems(items, result.SubFolders, result.TotalCount, root, 1);
+                items.Remove(loadingPlaceholder);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         }
 
         // ═════════════════════════════ Bookmark folders (groups) ═════════════════════════════
@@ -826,15 +901,17 @@ namespace ExplorerBookmarkBar.Views
             }
             else
             {
+                // Build menu items immediately (no blocking I/O) — assume all paths exist.
+                // The background check below will dim missing ones after the menu is already open.
+                var itemsToCheck = new List<Tuple<MenuItem, BookmarkItem>>();
                 foreach (var c in group.Children)
                 {
                     var child = c;
                     bool isDir = IsFileSystemPath(child.Path) || IsThisPc(child.Path);
-                    bool missing = IsFileSystemPath(child.Path) && !QuickExists(child.Path);
 
                     var mi = new MenuItem();
-                    mi.Header = MakeHeader(GetGeometryForType(child.IconType), GetBrushForType(child.IconType, child.CustomColor), child.Name, missing);
-                    mi.ToolTip = missing ? "Folder not found: " + child.Path : child.Path;
+                    mi.Header = MakeHeader(GetGeometryForType(child.IconType), GetBrushForType(child.IconType, child.CustomColor), child.Name, false);
+                    mi.ToolTip = child.Path;
                     AttachOpenHandlers(mi, child.Path, root);
 
                     // Right-click an entry: manage it (opens a separate menu)
@@ -849,19 +926,66 @@ namespace ExplorerBookmarkBar.Views
                         cm.IsOpen = true;
                     };
 
-                    if (isDir && !missing)
+                    if (isDir)
                     {
-                        mi.Items.Add(MakeInfoItem("Loading..."));
+                        var loadingItem = MakeInfoItem("Loading...");
+                        mi.Items.Add(loadingItem);
                         bool loaded = false;
+                        Action triggerLoad = () =>
+                        {
+                            if (loaded) return;
+                            loaded = true;
+                            PopulateSubfoldersAsync(mi.Items, child.Path, root, loadingItem);
+                        };
+                        mi.MouseEnter += (s, e) => triggerLoad();
                         mi.SubmenuOpened += (s, e) =>
                         {
-                            if (e.OriginalSource != mi || loaded) return;
-                            loaded = true;
-                            mi.Items.Clear();
-                            PopulateSubfolders(mi.Items, child.Path, root);
+                            if (e.OriginalSource != mi) return;
+                            triggerLoad();
                         };
+                        // Queue for async existence check
+                        if (IsFileSystemPath(child.Path))
+                            itemsToCheck.Add(Tuple.Create(mi, child));
                     }
                     root.Items.Add(mi);
+                }
+
+                // Async existence check — dim missing items after the menu is already visible
+                if (itemsToCheck.Count > 0)
+                {
+                    var paths = itemsToCheck.Select(t => t.Item2.Path).ToList();
+                    Task.Run(() =>
+                    {
+                        var results = new List<bool>();
+                        foreach (var p in paths)
+                        {
+                            bool exists = true;
+                            try
+                            {
+                                if (!FolderCacheService.Instance.IsSlowOrNetworkPath(p))
+                                    exists = Directory.Exists(p) || File.Exists(p);
+                            }
+                            catch { }
+                            results.Add(exists);
+                        }
+                        return results;
+                    }).ContinueWith(task =>
+                    {
+                        if (_detached || task.IsFaulted) return;
+                        var results = task.Result;
+                        for (int i = 0; i < itemsToCheck.Count && i < results.Count; i++)
+                        {
+                            if (!results[i])
+                            {
+                                var mi = itemsToCheck[i].Item1;
+                                var child = itemsToCheck[i].Item2;
+                                mi.Header = MakeHeader(GetGeometryForType(child.IconType), GetBrushForType(child.IconType, child.CustomColor), child.Name, true);
+                                mi.ToolTip = "Folder not found: " + child.Path;
+                                // Remove subfolder submenu for missing items
+                                mi.Items.Clear();
+                            }
+                        }
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
                 }
             }
 

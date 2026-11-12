@@ -55,6 +55,7 @@
     <Compile Include="Models\BookmarkDisplayItem.cs" />
     <Compile Include="Models\AppSettings.cs" />
     <Compile Include="Services\BookmarkManager.cs" />
+    <Compile Include="Services\FolderCacheService.cs" />
     <Compile Include="Services\Win32Helper.cs" />
     <Compile Include="Services\ExplorerComHelper.cs" />
     <Compile Include="Services\ExplorerHookEngine.cs" />

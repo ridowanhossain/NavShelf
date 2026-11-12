@@ -509,7 +509,8 @@ namespace ExplorerBookmarkBar.Services
                     }
                     else if (cls == "#32770")
                     {
-                        if (IsFileDialog(hwnd))
+                        RECT r;
+                        if (GetWindowRect(hwnd, out r) && r.Width >= 250 && r.Height >= 200 && IsFileDialog(hwnd))
                         {
                             list.Add(hwnd);
                         }

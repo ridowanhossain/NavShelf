@@ -70,11 +70,12 @@ namespace ExplorerBookmarkBar.Services
         private readonly Dictionary<IntPtr, ChildBarEntry> _activeBars = new Dictionary<IntPtr, ChildBarEntry>();
         private readonly DispatcherTimer _syncTimer;
         private bool _isPaused = false;
+        private int _themeCheckTick = 0;
 
         public ExplorerChildBarManager()
         {
             _syncTimer = new DispatcherTimer(DispatcherPriority.Render);
-            _syncTimer.Interval = TimeSpan.FromMilliseconds(30);
+            _syncTimer.Interval = TimeSpan.FromMilliseconds(40);
             _syncTimer.Tick += (s, e) => SyncExplorerChildBars();
 
             BookmarkManager.Instance.SettingsChanged += () =>
@@ -154,7 +155,13 @@ namespace ExplorerBookmarkBar.Services
 
             try
             {
-                ThemeManager.CheckAndApplyTheme();
+                // Theme changes are already handled via SystemEvents.UserPreferenceChanged;
+                // only poll registry occasionally as a lightweight fallback (~every 3s).
+                if (++_themeCheckTick >= 50)
+                {
+                    _themeCheckTick = 0;
+                    ThemeManager.CheckAndApplyTheme();
+                }
 
                 var windows = Win32Helper.GetAllVisibleExplorerWindows();
                 HashSet<IntPtr> currentWindows = new HashSet<IntPtr>(windows);
@@ -306,6 +313,8 @@ namespace ExplorerBookmarkBar.Services
                 ChildBarEntry entry;
                 if (!_activeBars.TryGetValue(expHwnd, out entry))
                 {
+                    var attachSw = Stopwatch.StartNew();
+
                     // Create new native WS_CHILD HwndSource inside Explorer or Dialog!
                     HwndSourceParameters parameters = new HwndSourceParameters("ExplorerBookmarkBarChild", clientWidth, physicalBarHeight)
                     {
@@ -351,7 +360,7 @@ namespace ExplorerBookmarkBar.Services
                         Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_SHOWWINDOW | Win32Helper.SWP_FRAMECHANGED
                     );
 
-                    App.Log("Attached native child bookmark bar to HWND 0x" + expHwnd.ToString("X") + " Child HWND 0x" + source.Handle.ToString("X") + " (DPI " + dpiScale.ToString("F2") + " PhysicalHeight " + physicalBarHeight + "px)");
+                    App.Log("Attached native child bookmark bar to HWND 0x" + expHwnd.ToString("X") + " Child HWND 0x" + source.Handle.ToString("X") + " (DPI " + dpiScale.ToString("F2") + " PhysicalHeight " + physicalBarHeight + "px) in " + attachSw.ElapsedMilliseconds + "ms");
                 }
                 else
                 {
@@ -393,16 +402,19 @@ namespace ExplorerBookmarkBar.Services
                     }
                     else
                     {
-                        // Ensure Z-order remains on top of any newly activated content
-                        Win32Helper.SetWindowPos(
-                            entry.ChildHwnd,
-                            Win32Helper.HWND_TOP,
-                            0,
-                            0,
-                            0,
-                            0,
-                            Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE | Win32Helper.SWP_SHOWWINDOW
-                        );
+                        // Only bring to top of Z-order if another child window actually moved above us
+                        if (Win32Helper.GetTopWindow(expHwnd) != entry.ChildHwnd)
+                        {
+                            Win32Helper.SetWindowPos(
+                                entry.ChildHwnd,
+                                Win32Helper.HWND_TOP,
+                                0,
+                                0,
+                                0,
+                                0,
+                                Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE | Win32Helper.SWP_SHOWWINDOW
+                            );
+                        }
                     }
                 }
 

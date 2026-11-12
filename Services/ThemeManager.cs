@@ -93,6 +93,10 @@ namespace ExplorerBookmarkBar.Services
             string menuBorder = isDark ? "#2B2B2B" : "#E5E5E5";
             string menuHover = isDark ? "#2D2D2D" : "#EDEDED";
             string menuSeparator = isDark ? "#383838" : "#E5E5E5";
+            string scrollTrackBg = isDark ? "#14FFFFFF" : "#0E000000";
+            string scrollThumbBg = isDark ? "#4DFFFFFF" : "#45000000";
+            string scrollThumbHoverBg = isDark ? "#80FFFFFF" : "#73000000";
+            string scrollThumbDragBg = isDark ? "#A6FFFFFF" : "#99000000";
 
             SetBrush(res, "BarBackground", barBg);
             SetBrush(res, "BarBorder", barBorder);
@@ -117,6 +121,10 @@ namespace ExplorerBookmarkBar.Services
             SetBrush(res, "MenuBorder", menuBorder);
             SetBrush(res, "MenuHover", menuHover);
             SetBrush(res, "MenuSeparator", menuSeparator);
+            SetBrush(res, "ScrollTrackBg", scrollTrackBg);
+            SetBrush(res, "ScrollThumbBg", scrollThumbBg);
+            SetBrush(res, "ScrollThumbHoverBg", scrollThumbHoverBg);
+            SetBrush(res, "ScrollThumbDragBg", scrollThumbDragBg);
 
             App.Log(string.Format("ThemeManager: Applied {0} theme.", isDark ? "Dark" : "Light"));
 

@@ -42,6 +42,7 @@ namespace ExplorerBookmarkBar.Services
         public const uint SWP_NOCOPYBITS = 0x0100;
         public const uint SWP_NOOWNERZORDER = 0x0200;
         public const uint SWP_NOSENDCHANGING = 0x0400;
+        public const uint SWP_ASYNCWINDOWPOS = 0x4000;
 
         public const uint GA_PARENT = 1;
         public const uint GA_ROOT = 2;

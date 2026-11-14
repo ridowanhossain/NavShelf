@@ -36,7 +36,13 @@ namespace ExplorerBookmarkBar.Services
             public int LastTop;
             public bool LastZoomed;
             public int SettleTicks;
+            public double LastDpi;
+            public double LastLogicalTop;
+            public bool RepaintParentAfterSettle;
         }
+
+        private const int WM_DPICHANGED_BEFOREPARENT = 0x02E2;
+        private const int WM_DPICHANGED_AFTERPARENT = 0x02E3;
 
         // Number of 30ms ticks to keep forcing reposition/redraw after a maximize/restore
         private const int SettleTickCount = 15;
@@ -222,9 +228,10 @@ namespace ExplorerBookmarkBar.Services
                     // and not just any bridge) so the bar lines up in maximized, restored and any DPI.
                     Win32Helper.POINT origin = new Win32Helper.POINT { X = 0, Y = 0 };
                     Win32Helper.ClientToScreen(expHwnd, ref origin);
-                    int minHeader = (int)Math.Round(60 * dpiScale);
-                    int maxHeader = (int)Math.Round(260 * dpiScale);
+                    int minHeader = (int)Math.Round(115 * dpiScale);
+                    int maxHeader = (int)Math.Round(165 * dpiScale);
                     int maxHeaderTop = (int)Math.Round(24 * dpiScale);
+                    int maxWidthDiff = (int)Math.Round(16 * dpiScale);
                     int headerBottom = -1;
 
                     Win32Helper.EnumChildWindows(expHwnd, (ch, lParam) =>
@@ -242,7 +249,7 @@ namespace ExplorerBookmarkBar.Services
                                 int w = r.Right - r.Left;
                                 if (relTop >= -maxHeaderTop && relTop <= maxHeaderTop
                                     && relBottom >= minHeader && relBottom <= maxHeader
-                                    && w >= clientRect.Width / 2
+                                    && Math.Abs(w - clientRect.Width) <= maxWidthDiff
                                     && relBottom > headerBottom)
                                 {
                                     headerBottom = relBottom;
@@ -256,14 +263,34 @@ namespace ExplorerBookmarkBar.Services
                         return true;
                     }, IntPtr.Zero);
 
+                    // Moved to a monitor with a different DPI (e.g. 100% <-> 125%): Explorer rebuilds
+                    // its XAML header bridge over several frames.
+                    if (existing != null && Math.Abs(dpiScale - existing.LastDpi) > 0.001)
+                    {
+                        existing.LastDpi = dpiScale;
+                        existing.SettleTicks = SettleTickCount;
+                        existing.RepaintParentAfterSettle = true;
+                    }
+
+                    double logicalTop = (existing != null && existing.LastLogicalTop >= 115 && existing.LastLogicalTop <= 165)
+                        ? existing.LastLogicalTop
+                        : 136.0;
+                    int expectedTopFromLogical = (int)Math.Round(logicalTop * dpiScale);
+
                     if (headerBottom > 0)
                     {
                         topBarHeight = headerBottom;
+                        if (existing != null && dpiScale > 0)
+                        {
+                            existing.LastLogicalTop = headerBottom / dpiScale;
+                        }
+                    }
+                    else if (expectedTopFromLogical > 0)
+                    {
+                        topBarHeight = expectedTopFromLogical;
                     }
                     else if (existing != null && existing.LastTop > 0)
                     {
-                        // Header not measurable right now (e.g. mid maximize/restore animation):
-                        // keep the last good position instead of jumping to a guess.
                         topBarHeight = existing.LastTop;
                     }
                     else
@@ -345,10 +372,19 @@ namespace ExplorerBookmarkBar.Services
                         LastWidth = clientWidth,
                         LastHeight = physicalBarHeight,
                         LastTop = topBarHeight,
-                        LastZoomed = Win32Helper.IsZoomed(expHwnd)
+                        LastZoomed = Win32Helper.IsZoomed(expHwnd),
+                        LastDpi = dpiScale,
+                        LastLogicalTop = dpiScale > 0 ? (topBarHeight / dpiScale) : topBarHeight
                     };
 
                     _activeBars[expHwnd] = entry;
+
+                    // Pin the bar to (0, LastTop). When the window is dragged to a monitor with a
+                    // different DPI, WPF/Windows re-lays out the child and can move it to (0,0) for a
+                    // moment, which leaves a "ghost" copy of the bar painted over Explorer's tabs.
+                    var hookedEntry = entry;
+                    source.AddHook((IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) =>
+                        ChildBarHook(hookedEntry, msg, lParam));
 
                     Win32Helper.SetWindowPos(
                         source.Handle,
@@ -375,8 +411,18 @@ namespace ExplorerBookmarkBar.Services
                         entry.LastZoomed = zoomed;
                         entry.SettleTicks = SettleTickCount;
                     }
+
                     bool settling = entry.SettleTicks > 0;
-                    if (settling) entry.SettleTicks--;
+                    if (settling)
+                    {
+                        entry.SettleTicks--;
+                        if (entry.SettleTicks == 0 && entry.RepaintParentAfterSettle)
+                        {
+                            entry.RepaintParentAfterSettle = false;
+                            Win32Helper.RedrawWindow(expHwnd, IntPtr.Zero, IntPtr.Zero,
+                                Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ERASE | Win32Helper.RDW_FRAME | Win32Helper.RDW_ALLCHILDREN);
+                        }
+                    }
 
                     // Update child bar position and ensure it stays at top of Z-order
                     if (settling || entry.LastWidth != clientWidth || entry.LastHeight != physicalBarHeight || entry.LastTop != topBarHeight)
@@ -385,6 +431,10 @@ namespace ExplorerBookmarkBar.Services
                         entry.LastHeight = physicalBarHeight;
                         entry.LastTop = topBarHeight;
 
+                        bool isTopZ = Win32Helper.GetTopWindow(expHwnd) == entry.ChildHwnd;
+                        uint swpFlags = Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOCOPYBITS;
+                        if (isTopZ) swpFlags |= Win32Helper.SWP_NOZORDER;
+
                         Win32Helper.SetWindowPos(
                             entry.ChildHwnd,
                             Win32Helper.HWND_TOP,
@@ -392,12 +442,12 @@ namespace ExplorerBookmarkBar.Services
                             topBarHeight,
                             clientWidth,
                             physicalBarHeight,
-                            Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_SHOWWINDOW | Win32Helper.SWP_FRAMECHANGED
+                            swpFlags
                         );
 
-                        // Repaint fully so the bar doesn't appear broken/half-drawn after resizing
+                        // Repaint the bar so it never appears half-drawn after resizing
                         Win32Helper.RedrawWindow(entry.ChildHwnd, IntPtr.Zero, IntPtr.Zero,
-                            Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ERASE | Win32Helper.RDW_ALLCHILDREN | Win32Helper.RDW_FRAME | Win32Helper.RDW_UPDATENOW);
+                            Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ALLCHILDREN);
                         try { if (entry.Control != null) entry.Control.InvalidateVisual(); } catch { }
                     }
                     else
@@ -412,7 +462,7 @@ namespace ExplorerBookmarkBar.Services
                                 0,
                                 0,
                                 0,
-                                Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE | Win32Helper.SWP_SHOWWINDOW
+                                Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE
                             );
                         }
                     }
@@ -449,7 +499,7 @@ namespace ExplorerBookmarkBar.Services
                                         contentTop,
                                         clientWidth,
                                         tabHeight,
-                                        Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOZORDER | Win32Helper.SWP_FRAMECHANGED | Win32Helper.SWP_NOSENDCHANGING
+                                        Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOZORDER | Win32Helper.SWP_NOSENDCHANGING | Win32Helper.SWP_ASYNCWINDOWPOS
                                     );
                                 }
                             }
@@ -499,8 +549,100 @@ namespace ExplorerBookmarkBar.Services
             }
         }
 
+        /// <summary>
+        /// Window hook on the bar's child HWND. Blocks any move that doesn't come from us (WPF/Windows
+        /// move the child to (0,0) during a cross-monitor DPI change) and re-syncs right after the DPI
+        /// switch instead of waiting for the next timer tick.
+        /// </summary>
+        private IntPtr ChildBarHook(ChildBarEntry entry, int msg, IntPtr lParam)
+        {
+            try
+            {
+                if (msg == WM_DPICHANGED_BEFOREPARENT || msg == WM_DPICHANGED_AFTERPARENT)
+                {
+                    double newDpi = Win32Helper.GetWindowDpiScale(entry.ExplorerHwnd);
+                    if (newDpi <= 0) newDpi = Win32Helper.GetWindowDpiScale(entry.ChildHwnd);
+                    if (newDpi > 0 && Math.Abs(newDpi - entry.LastDpi) > 0.001)
+                    {
+                        double logicalTop = (entry.LastLogicalTop >= 115 && entry.LastLogicalTop <= 165)
+                            ? entry.LastLogicalTop
+                            : 136.0;
+                        entry.LastTop = (int)Math.Round(logicalTop * newDpi);
+                        entry.LastDpi = newDpi;
+                    }
+                    entry.LastHeight = -1;
+                    entry.SettleTicks = SettleTickCount;
+                    entry.RepaintParentAfterSettle = true;
+                }
+                else if (msg == Win32Helper.WM_WINDOWPOSCHANGING && entry.LastTop > 0 && lParam != IntPtr.Zero)
+                {
+                    double curDpi = Win32Helper.GetWindowDpiScale(entry.ExplorerHwnd);
+                    if (curDpi > 0 && Math.Abs(curDpi - entry.LastDpi) > 0.001)
+                    {
+                        double logicalTop = (entry.LastLogicalTop >= 115 && entry.LastLogicalTop <= 165)
+                            ? entry.LastLogicalTop
+                            : 136.0;
+                        entry.LastTop = (int)Math.Round(logicalTop * curDpi);
+                        entry.LastDpi = curDpi;
+                        entry.SettleTicks = SettleTickCount;
+                        entry.RepaintParentAfterSettle = true;
+                    }
+
+                    var wp = (Win32Helper.WINDOWPOS)Marshal.PtrToStructure(lParam, typeof(Win32Helper.WINDOWPOS));
+                    bool changed = false;
+                    if ((wp.flags & Win32Helper.SWP_NOMOVE) == 0 && (wp.x != 0 || wp.y != entry.LastTop))
+                    {
+                        wp.x = 0;
+                        wp.y = entry.LastTop;
+                        changed = true;
+                    }
+                    if ((wp.flags & Win32Helper.SWP_NOSIZE) == 0 && curDpi > 0)
+                    {
+                        Win32Helper.RECT rc;
+                        if (Win32Helper.GetClientRect(entry.ExplorerHwnd, out rc) && rc.Width >= 100)
+                        {
+                            int targetH = (int)Math.Round(BookmarkManager.Instance.Settings.BarHeight * curDpi);
+                            if (wp.cx != rc.Width || wp.cy != targetH)
+                            {
+                                wp.cx = rc.Width;
+                                wp.cy = targetH;
+                                changed = true;
+                            }
+                            entry.LastWidth = rc.Width;
+                            entry.LastHeight = targetH;
+                        }
+                    }
+                    if ((wp.flags & Win32Helper.SWP_NOCOPYBITS) == 0)
+                    {
+                        wp.flags |= Win32Helper.SWP_NOCOPYBITS;
+                        changed = true;
+                    }
+                    if (changed)
+                    {
+                        Marshal.StructureToPtr(wp, lParam, false);
+                    }
+                }
+            }
+            catch { }
+            return IntPtr.Zero;
+        }
+
         private void DisposeBarEntry(ChildBarEntry entry)
         {
+            try
+            {
+                if (entry.ChildHwnd != IntPtr.Zero && Win32Helper.IsWindow(entry.ChildHwnd))
+                {
+                    Win32Helper.SetWindowPos(
+                        entry.ChildHwnd,
+                        IntPtr.Zero,
+                        0, 0, 0, 0,
+                        Win32Helper.SWP_HIDEWINDOW | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE | Win32Helper.SWP_NOZORDER | Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOCOPYBITS
+                    );
+                }
+            }
+            catch { }
+
             try
             {
                 if (entry.Control != null)
@@ -516,6 +658,16 @@ namespace ExplorerBookmarkBar.Services
                 {
                     entry.Source.RootVisual = null;
                     entry.Source.Dispose();
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (entry.ExplorerHwnd != IntPtr.Zero && Win32Helper.IsWindow(entry.ExplorerHwnd))
+                {
+                    Win32Helper.RedrawWindow(entry.ExplorerHwnd, IntPtr.Zero, IntPtr.Zero,
+                        Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ERASE | Win32Helper.RDW_FRAME | Win32Helper.RDW_ALLCHILDREN);
                 }
             }
             catch { }

@@ -99,6 +99,9 @@ namespace ExplorerBookmarkBar
                 }
                 cacheService.WarmUpAsync(allPaths);
 
+                Log("Starting Explorer Tab Utility service...");
+                ExplorerTabUtilityService.Instance.Start();
+
                 Log("Starting Native Child Bar Manager...");
                 ExplorerChildBarManager.Instance.Start();
 
@@ -242,6 +245,7 @@ namespace ExplorerBookmarkBar
             {
                 FolderCacheService.Instance.FlushToDisk();
                 KeyboardShortcutService.Instance.Stop();
+                ExplorerTabUtilityService.Instance.Stop();
                 ExplorerChildBarManager.Instance.Stop();
 
                 if (_hotkeyHwndSource != null)

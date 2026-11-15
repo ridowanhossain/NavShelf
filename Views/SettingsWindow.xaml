@@ -272,13 +272,14 @@
                     </StackPanel>
                 </Border>
 
-                <!-- Startup Section -->
+                <!-- Startup & Explorer Behavior Section -->
                 <Border Background="{DynamicResource SectionBg}" CornerRadius="6" Padding="12,10" Margin="0,0,0,10">
                     <StackPanel>
-                        <TextBlock Text="Startup Settings"
+                        <TextBlock Text="Startup &amp; Explorer Behavior"
                                    FontWeight="SemiBold" FontSize="12.5" Foreground="{DynamicResource TextPrimary}" Margin="0,0,0,6" />
 
                         <CheckBox x:Name="ChkAutoStart" Content="Start automatically on Windows boot" />
+                        <CheckBox x:Name="ChkOpenFoldersInNewTab" Content="Open new Explorer windows as tabs in the existing window" />
                     </StackPanel>
                 </Border>
 

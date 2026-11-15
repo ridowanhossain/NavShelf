@@ -17,6 +17,7 @@ namespace ExplorerBookmarkBar.Models
         public string Theme { get; set; } // "Dark", "Light", "Fluent"
         public bool UseAutoLayout { get; set; }
         public bool EnableNumberShortcuts { get; set; } // Alt+1..9 opens bookmark N in Explorer / file dialogs
+        public bool OpenFoldersInNewTab { get; set; } // Redirect newly opened Explorer windows into tabs of an existing window
 
         public AppSettings()
         {
@@ -33,6 +34,7 @@ namespace ExplorerBookmarkBar.Models
             Theme = "Dark";
             UseAutoLayout = true;
             EnableNumberShortcuts = true;
+            OpenFoldersInNewTab = true;
         }
     }
 }

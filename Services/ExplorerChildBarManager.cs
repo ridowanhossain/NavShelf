@@ -169,12 +169,17 @@ namespace ExplorerBookmarkBar.Services
                     ThemeManager.CheckAndApplyTheme();
                 }
 
+                ExplorerTabUtilityService.Instance.TrackExistingWindows();
+
                 var windows = Win32Helper.GetAllVisibleExplorerWindows();
                 HashSet<IntPtr> currentWindows = new HashSet<IntPtr>(windows);
 
                 // Attach child bar to any new Explorer windows on any monitor
                 foreach (var expHwnd in windows)
                 {
+                    if (ExplorerTabUtilityService.Instance.IsWindowRedirecting(expHwnd))
+                        continue;
+
                     if (Win32Helper.IsWindow(expHwnd) && !Win32Helper.IsIconic(expHwnd))
                     {
                         UpdateOrAttachChildBar(expHwnd);

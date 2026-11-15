@@ -159,6 +159,15 @@ namespace ExplorerBookmarkBar.Services
             return IntPtr.Zero;
         }
 
+        public class ExplorerWindowSnapshot
+        {
+            public IntPtr ExplorerHwnd;
+            public IntPtr TabHwnd;
+            public string Path;
+            public string[] SelectedNames;
+            public dynamic ComWindow;
+        }
+
         private class BrowserTabMatch
         {
             public dynamic Win;
@@ -208,6 +217,23 @@ namespace ExplorerBookmarkBar.Services
                                         if (sv.GetWindow(out viewHwnd) == 0 && viewHwnd != IntPtr.Zero)
                                         {
                                             match.TabHwnd = GetShellTabAncestor(viewHwnd, targetHwnd);
+                                        }
+                                    }
+
+                                    if (match.TabHwnd == IntPtr.Zero)
+                                    {
+                                        IntPtr browserHwnd;
+                                        if (sb.GetWindow(out browserHwnd) == 0 && browserHwnd != IntPtr.Zero)
+                                        {
+                                            string bCls = Win32Helper.GetWindowClassName(browserHwnd);
+                                            if (bCls == "ShellTabWindowClass" || bCls == "TabWindowClass")
+                                            {
+                                                match.TabHwnd = browserHwnd;
+                                            }
+                                            else
+                                            {
+                                                match.TabHwnd = GetShellTabAncestor(browserHwnd, targetHwnd);
+                                            }
                                         }
                                     }
 
@@ -426,6 +452,231 @@ namespace ExplorerBookmarkBar.Services
             catch { return string.Empty; }
         }
 
+        private static string ExtractPathFromMatch(BrowserTabMatch match)
+        {
+            if (match == null) return string.Empty;
+
+            if (!string.IsNullOrEmpty(match.ShellItemPath))
+            {
+                return match.ShellItemPath;
+            }
+
+            dynamic win = match.Win;
+            if (win == null) return string.Empty;
+
+            try
+            {
+                if (win.Document != null && win.Document.Folder != null && win.Document.Folder.Self != null)
+                {
+                    string path = win.Document.Folder.Self.Path;
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        return path;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                string url = win.LocationURL;
+                if (!string.IsNullOrEmpty(url))
+                {
+                    if (url.StartsWith("file:///", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Uri uri = new Uri(url);
+                        return uri.LocalPath;
+                    }
+                    return url;
+                }
+            }
+            catch { }
+
+            try
+            {
+                string locName = win.LocationName;
+                if (!string.IsNullOrEmpty(locName))
+                {
+                    return locName;
+                }
+            }
+            catch { }
+
+            return string.Empty;
+        }
+
+        private static string[] ExtractSelectedItemNames(dynamic win)
+        {
+            if (win == null) return null;
+            try
+            {
+                dynamic doc = win.Document;
+                if (doc == null) return null;
+                dynamic selected = doc.SelectedItems();
+                if (selected == null) return null;
+                int count = (int)selected.Count;
+                if (count <= 0) return null;
+
+                string[] names = new string[count];
+                for (int i = 0; i < count; i++)
+                {
+                    names[i] = (string)selected.Item(i).Name;
+                }
+                return names;
+            }
+            catch { return null; }
+        }
+
+        private static void TrySelectItems(dynamic win, string[] names)
+        {
+            if (win == null || names == null || names.Length == 0) return;
+            try
+            {
+                dynamic doc = win.Document;
+                if (doc == null || doc.Folder == null) return;
+                for (int i = 0; i < names.Length; i++)
+                {
+                    string name = names[i];
+                    if (string.IsNullOrEmpty(name)) continue;
+                    object item = doc.Folder.ParseName(name);
+                    if (item != null)
+                    {
+                        // 1 = SVSI_SELECT
+                        doc.SelectItem(ref item, 1);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static ExplorerWindowSnapshot TryGetExplorerWindowSnapshot(IntPtr explorerHwnd)
+        {
+            if (explorerHwnd == IntPtr.Zero || !Win32Helper.IsWindow(explorerHwnd))
+                return null;
+
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellType == null) return null;
+
+                dynamic shell = Activator.CreateInstance(shellType);
+                dynamic windows = shell.Windows();
+                if (windows == null || windows.Count == 0) return null;
+
+                long targetId = explorerHwnd.ToInt64();
+                for (int i = windows.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        dynamic win = windows.Item(i);
+                        if (win == null) continue;
+
+                        long winHwnd = 0;
+                        try { winHwnd = (long)win.HWND; } catch { }
+
+                        BrowserTabMatch info = GetTabInfoFromBrowser(win, explorerHwnd);
+                        bool matchesWindow = (winHwnd == targetId)
+                            || (info != null && info.TabHwnd != IntPtr.Zero && Win32Helper.GetRootWindow(info.TabHwnd) == explorerHwnd);
+
+                        if (!matchesWindow || info == null) continue;
+
+                        string path = ExtractPathFromMatch(info);
+                        if (!string.IsNullOrEmpty(path))
+                        {
+                            return new ExplorerWindowSnapshot
+                            {
+                                ExplorerHwnd = explorerHwnd,
+                                TabHwnd = info.TabHwnd,
+                                Path = path,
+                                SelectedNames = ExtractSelectedItemNames(win),
+                                ComWindow = win
+                            };
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static BrowserTabMatch FindBrowserTabByHwnd(IntPtr explorerHwnd, IntPtr tabHwnd)
+        {
+            if (explorerHwnd == IntPtr.Zero || tabHwnd == IntPtr.Zero) return null;
+
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellType == null) return null;
+
+                dynamic shell = Activator.CreateInstance(shellType);
+                dynamic windows = shell.Windows();
+                if (windows == null || windows.Count == 0) return null;
+
+                for (int i = windows.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        dynamic win = windows.Item(i);
+                        if (win == null) continue;
+
+                        BrowserTabMatch info = GetTabInfoFromBrowser(win, explorerHwnd);
+                        if (info != null && info.TabHwnd == tabHwnd)
+                        {
+                            return info;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        public static bool NavigateTabByHwnd(IntPtr explorerHwnd, IntPtr tabHwnd, string path, string[] selectedNames = null)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+
+            string normalized = NormalizeSpecialPath(path);
+            BrowserTabMatch match = (tabHwnd != IntPtr.Zero)
+                ? FindBrowserTabByHwnd(explorerHwnd, tabHwnd)
+                : FindActiveBrowserTab(explorerHwnd);
+
+            if (match == null) return false;
+
+            bool navigated = false;
+            if (match.Browser != null)
+            {
+                navigated = NavigateWithShellBrowser(match.Browser, normalized);
+            }
+
+            if (!navigated && match.Win != null)
+            {
+                try
+                {
+                    match.Win.Navigate2(normalized);
+                    navigated = true;
+                }
+                catch { }
+            }
+
+            if (navigated && selectedNames != null && selectedNames.Length > 0 && match.Win != null)
+            {
+                var selectTimer = new System.Windows.Threading.DispatcherTimer();
+                selectTimer.Interval = TimeSpan.FromMilliseconds(220);
+                selectTimer.Tick += (s, e) =>
+                {
+                    selectTimer.Stop();
+                    TrySelectItems(match.Win, selectedNames);
+                };
+                selectTimer.Start();
+            }
+
+            return navigated;
+        }
+
         public static string GetActiveExplorerPath(IntPtr targetHwnd)
         {
             try
@@ -443,52 +694,7 @@ namespace ExplorerBookmarkBar.Services
                 var match = FindActiveBrowserTab(targetHwnd);
                 if (match != null)
                 {
-                    if (!string.IsNullOrEmpty(match.ShellItemPath))
-                    {
-                        return match.ShellItemPath;
-                    }
-
-                    dynamic win = match.Win;
-                    if (win != null)
-                    {
-                        try
-                        {
-                            if (win.Document != null && win.Document.Folder != null && win.Document.Folder.Self != null)
-                            {
-                                string path = win.Document.Folder.Self.Path;
-                                if (!string.IsNullOrEmpty(path))
-                                {
-                                    return path;
-                                }
-                            }
-                        }
-                        catch { }
-
-                        try
-                        {
-                            string url = win.LocationURL;
-                            if (!string.IsNullOrEmpty(url))
-                            {
-                                if (url.StartsWith("file:///", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    Uri uri = new Uri(url);
-                                    return uri.LocalPath;
-                                }
-                                return url;
-                            }
-                        }
-                        catch { }
-
-                        try
-                        {
-                            string locName = win.LocationName;
-                            if (!string.IsNullOrEmpty(locName))
-                            {
-                                return locName;
-                            }
-                        }
-                        catch { }
-                    }
+                    return ExtractPathFromMatch(match);
                 }
             }
             catch { }
@@ -889,7 +1095,32 @@ namespace ExplorerBookmarkBar.Services
             }
         }
 
-        public static void OpenInNewTab(IntPtr targetHwnd, string path)
+        private static string NormalizePathForComparison(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return string.Empty;
+            string p = path.Trim().TrimEnd('\\', '/');
+            if (p.StartsWith("shell:::", StringComparison.OrdinalIgnoreCase))
+            {
+                p = p.Substring(6); // keep "::{GUID}"
+            }
+            return p;
+        }
+
+        private static bool PathsRoughlyEqual(string a, string b)
+        {
+            string na = NormalizePathForComparison(a);
+            string nb = NormalizePathForComparison(b);
+            if (string.Equals(na, nb, StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Home / Quick Access has two CLSIDs across Windows 11 builds
+            bool aHome = na.IndexOf("F874310E-B6B7-47DC-BC84-B9E6B38F5903", StringComparison.OrdinalIgnoreCase) >= 0
+                || na.IndexOf("679F85CB-0220-4080-B29B-55403D05AAB6", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool bHome = nb.IndexOf("F874310E-B6B7-47DC-BC84-B9E6B38F5903", StringComparison.OrdinalIgnoreCase) >= 0
+                || nb.IndexOf("679F85CB-0220-4080-B29B-55403D05AAB6", StringComparison.OrdinalIgnoreCase) >= 0;
+            return aHome && bHome;
+        }
+
+        public static void OpenInNewTab(IntPtr targetHwnd, string path, string[] selectedNames = null)
         {
             if (string.IsNullOrEmpty(path)) return;
 
@@ -915,9 +1146,8 @@ namespace ExplorerBookmarkBar.Services
                 return;
             }
 
-            // Check if this Explorer window supports tabs (ShellTabWindowClass)
-            IntPtr initialActiveTab = GetActiveShellTabHwnd(targetHwnd);
-            if (initialActiveTab == IntPtr.Zero)
+            var existingTabs = Win32Helper.GetExplorerTabs(targetHwnd);
+            if (existingTabs.Count == 0)
             {
                 // Classic / non-tabbed Explorer (e.g. Windows 10) -> open in new window
                 OpenInNewWindow(path);
@@ -929,55 +1159,91 @@ namespace ExplorerBookmarkBar.Services
                 // Ensure WPF button releases keyboard focus
                 try { System.Windows.Input.Keyboard.ClearFocus(); } catch { }
 
-                Win32Helper.SetForegroundWindow(targetHwnd);
-                System.Threading.Thread.Sleep(30);
+                Win32Helper.RestoreWindowToForeground(targetHwnd);
 
-                // Send Ctrl+T to create a new tab in Windows 11 File Explorer
-                const byte VK_CONTROL = 0x11;
-                const byte VK_T = 0x54;
-                const uint KEYEVENTF_KEYUP = 0x0002;
+                // Trigger Explorer's native Ctrl+T command (0xA21B) directly on ShellTabWindowClass
+                Win32Helper.PostMessage(existingTabs[0], Win32Helper.WM_COMMAND, (IntPtr)0xA21B, IntPtr.Zero);
 
-                Win32Helper.keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-                Win32Helper.keybd_event(VK_T, 0, 0, UIntPtr.Zero);
-                Win32Helper.keybd_event(VK_T, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                Win32Helper.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-
-                // In Windows 11, tab creation is asynchronous (takes 50-250ms).
-                // We poll every 35ms to detect when the new tab is active and its COM object is ready,
-                // then navigate via IShellBrowser.BrowseObject (instant, silent, zero address bar typing).
+                var existingSet = new System.Collections.Generic.HashSet<IntPtr>(existingTabs);
+                IntPtr capturedNewTabHwnd = IntPtr.Zero;
+                int tabAppearAttempt = -1;
                 int attempts = 0;
-                const int maxAttempts = 35; // ~1.2s timeout
+                const int maxAttempts = 72; // ~1.8s at 25ms interval
+                bool fallbackCtrlTSent = false;
+
                 var timer = new System.Windows.Threading.DispatcherTimer();
-                timer.Interval = TimeSpan.FromMilliseconds(35);
+                timer.Interval = TimeSpan.FromMilliseconds(25);
                 timer.Tick += (s, e) =>
                 {
                     attempts++;
                     try
                     {
-                        IntPtr currentActiveTab = GetActiveShellTabHwnd(targetHwnd);
-                        bool tabChanged = (currentActiveTab != IntPtr.Zero && currentActiveTab != initialActiveTab);
-
-                        // If new tab is active OR we have waited > 300ms (attempts >= 9)
-                        if (tabChanged || attempts >= 9)
+                        if (!Win32Helper.IsWindow(targetHwnd))
                         {
-                            var match = FindActiveBrowserTab(targetHwnd);
-                            if (match != null)
+                            timer.Stop();
+                            return;
+                        }
+
+                        if (capturedNewTabHwnd == IntPtr.Zero)
+                        {
+                            var currentTabs = Win32Helper.GetExplorerTabs(targetHwnd);
+                            for (int i = 0; i < currentTabs.Count; i++)
                             {
-                                if (match.Browser != null && NavigateWithShellBrowser(match.Browser, path))
+                                if (!existingSet.Contains(currentTabs[i]))
+                                {
+                                    capturedNewTabHwnd = currentTabs[i];
+                                    tabAppearAttempt = attempts;
+                                    break;
+                                }
+                            }
+
+                            // If 0xA21B did not spawn a tab within ~400ms, retry once with Ctrl+T
+                            if (capturedNewTabHwnd == IntPtr.Zero && !fallbackCtrlTSent && attempts >= 16)
+                            {
+                                fallbackCtrlTSent = true;
+                                App.Log("OpenInNewTab: 0xA21B did not create a tab within 400ms; sending Ctrl+T fallback.");
+                                Win32Helper.RestoreWindowToForeground(targetHwnd);
+                                Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
+                                Win32Helper.keybd_event(0x54 /* VK_T */, 0, 0, UIntPtr.Zero);
+                                Win32Helper.keybd_event(0x54 /* VK_T */, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                                Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                            }
+                        }
+
+                        if (capturedNewTabHwnd != IntPtr.Zero)
+                        {
+                            var tabMatch = FindBrowserTabByHwnd(targetHwnd, capturedNewTabHwnd);
+                            string readyPath = tabMatch != null ? ExtractPathFromMatch(tabMatch) : string.Empty;
+                            bool waitedEnough = (attempts - tabAppearAttempt) >= 8; // ~200ms settle for default tab nav
+
+                            if (tabMatch != null && (!string.IsNullOrEmpty(readyPath) || waitedEnough))
+                            {
+                                if (NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames))
                                 {
                                     timer.Stop();
-                                    return;
-                                }
+                                    Win32Helper.RestoreWindowToForeground(targetHwnd);
 
-                                if (match.Win != null)
-                                {
-                                    try
+                                    // Re-verify ~180ms later so Explorer's default new-tab page does not overwrite target path
+                                    var verifyTimer = new System.Windows.Threading.DispatcherTimer();
+                                    verifyTimer.Interval = TimeSpan.FromMilliseconds(180);
+                                    verifyTimer.Tick += (vs, ve) =>
                                     {
-                                        match.Win.Navigate2(path);
-                                        timer.Stop();
-                                        return;
-                                    }
-                                    catch { }
+                                        verifyTimer.Stop();
+                                        try
+                                        {
+                                            if (!Win32Helper.IsWindow(targetHwnd) || !Win32Helper.IsWindow(capturedNewTabHwnd)) return;
+                                            var checkMatch = FindBrowserTabByHwnd(targetHwnd, capturedNewTabHwnd);
+                                            string currentPath = checkMatch != null ? ExtractPathFromMatch(checkMatch) : string.Empty;
+                                            if (!PathsRoughlyEqual(currentPath, path))
+                                            {
+                                                NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames);
+                                            }
+                                            Win32Helper.RestoreWindowToForeground(targetHwnd);
+                                        }
+                                        catch { }
+                                    };
+                                    verifyTimer.Start();
+                                    return;
                                 }
                             }
                         }
@@ -985,8 +1251,14 @@ namespace ExplorerBookmarkBar.Services
                         if (attempts >= maxAttempts)
                         {
                             timer.Stop();
-                            // Fallback
-                            NavigateActiveExplorer(targetHwnd, path);
+                            if (capturedNewTabHwnd != IntPtr.Zero)
+                            {
+                                NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames);
+                            }
+                            else
+                            {
+                                NavigateActiveExplorer(targetHwnd, path);
+                            }
                         }
                     }
                     catch

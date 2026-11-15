@@ -25,6 +25,16 @@ namespace ExplorerBookmarkBar.Services
         public const int WS_EX_NOACTIVATE = 0x08000000;
         public const int WS_EX_TOPMOST = 0x00000008;
         public const int WS_EX_CONTROLPARENT = 0x00010000;
+        public const int WS_EX_LAYERED = 0x00080000;
+
+        public const uint LWA_ALPHA = 0x00000002;
+        public const int SW_SHOWNOACTIVATE = 4;
+        public const int SW_RESTORE = 9;
+
+        public const uint EVENT_OBJECT_CREATE = 0x8000;
+        public const uint EVENT_OBJECT_SHOW = 0x8002;
+        public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+        public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
@@ -61,6 +71,7 @@ namespace ExplorerBookmarkBar.Services
         public const int WM_WINDOWPOSCHANGING = 0x0046;
         public const int WM_DESTROY = 0x0002;
         public const int WM_NCDESTROY = 0x0082;
+        public const int WM_CLOSE = 0x0010;
         public const int WM_ACTIVATE = 0x0006;
         public const int WM_SETFOCUS = 0x0007;
 
@@ -104,6 +115,22 @@ namespace ExplorerBookmarkBar.Services
 
         public delegate IntPtr SubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, IntPtr dwRefData);
         public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hModWinEventProc, WinEventDelegate lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
@@ -321,11 +348,14 @@ namespace ExplorerBookmarkBar.Services
         public const uint WM_KEYUP = 0x0101;
         public const uint WM_COMMAND = 0x0111;
         public const int VK_RETURN = 0x0D;
+        public const int VK_LBUTTON = 0x01;
+        public const int VK_SHIFT = 0x10;
         public const byte VK_CONTROL = 0x11;
         public const byte VK_L = 0x4C;
         public const byte VK_MENU = 0x12;
         public const byte VK_D = 0x44;
         public const byte VK_V = 0x56;
+        public const byte VK_F23 = 0x86;
         public const uint KEYEVENTF_KEYUP = 0x0002;
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
@@ -520,6 +550,59 @@ namespace ExplorerBookmarkBar.Services
                 return true;
             }, IntPtr.Zero);
             return list;
+        }
+
+        public static List<IntPtr> GetAllCabinetWindows()
+        {
+            List<IntPtr> list = new List<IntPtr>();
+            IntPtr hwnd = IntPtr.Zero;
+            while ((hwnd = FindWindowEx(IntPtr.Zero, hwnd, "CabinetWClass", null)) != IntPtr.Zero)
+            {
+                if (IsWindow(hwnd) && IsWindowVisible(hwnd))
+                {
+                    list.Add(hwnd);
+                }
+            }
+            return list;
+        }
+
+        public static List<IntPtr> GetExplorerTabs(IntPtr explorerHwnd)
+        {
+            List<IntPtr> tabs = new List<IntPtr>();
+            if (explorerHwnd == IntPtr.Zero || !IsWindow(explorerHwnd))
+                return tabs;
+
+            IntPtr child = IntPtr.Zero;
+            while ((child = FindWindowEx(explorerHwnd, child, "ShellTabWindowClass", null)) != IntPtr.Zero)
+            {
+                tabs.Add(child);
+            }
+            return tabs;
+        }
+
+        public static void RestoreWindowToForeground(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+                return;
+
+            if (IsIconic(hwnd))
+            {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+
+            if (SetForegroundWindow(hwnd))
+                return;
+
+            // Bypass Windows foreground lock restriction using benign F23 key press
+            keybd_event(VK_F23, 0, 0, UIntPtr.Zero);
+            keybd_event(VK_F23, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            SetForegroundWindow(hwnd);
+        }
+
+        public static bool IsCtrlShiftDown()
+        {
+            return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0
+                && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
         }
 
         public static bool GetWindowBounds(IntPtr hWnd, out RECT bounds)

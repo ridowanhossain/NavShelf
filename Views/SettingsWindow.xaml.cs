@@ -98,10 +98,12 @@ namespace ExplorerBookmarkBar.Views
                 AutoHideWhenInactive = _manager.Settings.AutoHideWhenInactive,
                 StartWithWindows = _manager.Settings.StartWithWindows,
                 UseAutoLayout = _manager.Settings.UseAutoLayout,
-                EnableNumberShortcuts = _manager.Settings.EnableNumberShortcuts
+                EnableNumberShortcuts = _manager.Settings.EnableNumberShortcuts,
+                OpenFoldersInNewTab = _manager.Settings.OpenFoldersInNewTab
             };
 
             ChkNumberShortcuts.IsChecked = _manager.Settings.EnableNumberShortcuts;
+            ChkOpenFoldersInNewTab.IsChecked = _manager.Settings.OpenFoldersInNewTab;
 
             // Set UI values
             SliderBarHeight.Value = _manager.Settings.BarHeight;
@@ -155,6 +157,7 @@ namespace ExplorerBookmarkBar.Views
             _manager.Settings.RightMargin = 0;
             _manager.Settings.StartWithWindows = ChkAutoStart.IsChecked == true;
             _manager.Settings.EnableNumberShortcuts = ChkNumberShortcuts.IsChecked == true;
+            _manager.Settings.OpenFoldersInNewTab = ChkOpenFoldersInNewTab.IsChecked == true;
 
             Win32Helper.SetAutoStart(_manager.Settings.StartWithWindows);
             _manager.SaveSettings();
@@ -181,6 +184,7 @@ namespace ExplorerBookmarkBar.Views
             _manager.Settings.RightMargin = 0;
             _manager.Settings.StartWithWindows = _backupSettings.StartWithWindows;
             _manager.Settings.EnableNumberShortcuts = _backupSettings.EnableNumberShortcuts;
+            _manager.Settings.OpenFoldersInNewTab = _backupSettings.OpenFoldersInNewTab;
 
             Win32Helper.SetAutoStart(_backupSettings.StartWithWindows);
             _manager.SaveSettings();

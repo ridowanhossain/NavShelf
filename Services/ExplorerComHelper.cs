@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Automation;
 
 namespace ExplorerBookmarkBar.Services
 {
@@ -60,49 +63,216 @@ namespace ExplorerBookmarkBar.Services
         }
 
         [ComImport]
-        [Guid("cde725b0-3009-11d0-9940-00c04fa309f4")]
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IFolderView
+        [Guid("85CB6900-4D95-11CF-960C-0080C7F4EE85")]
+        [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+        private interface IShellWindows
         {
             [PreserveSig]
-            int GetCurrentViewMode(out uint pViewMode);
+            int get_Count(out int Count);
             [PreserveSig]
-            int SetCurrentViewMode(uint ViewMode);
+            int Item([In, MarshalAs(UnmanagedType.Struct)] object index, [Out, MarshalAs(UnmanagedType.IDispatch)] out object Folder);
             [PreserveSig]
-            int GetFolder([In] ref Guid riid, [Out] out IntPtr ppv);
+            int _NewEnum([Out, MarshalAs(UnmanagedType.IUnknown)] out object ppunk);
+            [PreserveSig]
+            int Register([In, MarshalAs(UnmanagedType.IDispatch)] object pid, int HWND, int swClass, out int plCookie);
+            [PreserveSig]
+            int RegisterPending(int lThreadId, [In] ref object pvarloc, [In] ref object pvarlocRoot, int swClass, out int plCookie);
+            [PreserveSig]
+            int Revoke(int lCookie);
+            [PreserveSig]
+            int OnNavigate(int lCookie, [In] ref object pvarLoc);
+            [PreserveSig]
+            int OnActivated(int lCookie, short fActive);
+            [PreserveSig]
+            int FindWindowSW([In] ref object pvarLoc, [In] ref object pvarLocRoot, int swClass, out int phwnd, int swfwOptions, [Out, MarshalAs(UnmanagedType.IDispatch)] out object ppdispOut);
         }
 
-        [ComImport]
-        [Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe")]
-        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        private interface IShellItem
-        {
-            [PreserveSig]
-            int BindToHandler(IntPtr pbc, [In] ref Guid bhid, [In] ref Guid riid, out IntPtr ppv);
-            [PreserveSig]
-            int GetParent(out IShellItem ppsi);
-            [PreserveSig]
-            int GetDisplayName(uint sigdnName, out IntPtr ppszName);
-            [PreserveSig]
-            int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-            [PreserveSig]
-            int Compare(IShellItem psi, uint hint, out int piOrder);
-        }
-
+        private static readonly Guid CLSID_ShellWindows = new Guid("9BA05972-F6A8-11CF-A442-00A0C90A8F39");
         private static readonly Guid SID_STopLevelBrowser = new Guid("4C96BE40-915C-11CF-99D3-00AA004AE837");
         private static readonly Guid SID_SShellBrowser = new Guid("000214E2-0000-0000-C000-000000000046");
         private static readonly Guid IID_IShellBrowser = new Guid("000214E2-0000-0000-C000-000000000046");
-        private static readonly Guid IID_IShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
 
-        private const uint SIGDN_DESKTOPABSOLUTEPARSING = 0x80028000;
+        private const int SWC_DESKTOP = 0x8;
+        private const int SWFO_NEEDDISPATCH = 0x1;
         private const uint SBSP_SAMEBROWSER = 0x0001;
         private const uint SBSP_ABSOLUTE = 0x0000;
+
+        private static dynamic s_cachedDesktopDoc;
 
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern int SHParseDisplayName([MarshalAs(UnmanagedType.LPWStr)] string pszName, IntPtr pbc, out IntPtr ppidl, uint sfgaoIn, out uint psfgaoOut);
 
         [DllImport("ole32.dll")]
         private static extern void CoTaskMemFree(IntPtr pv);
+
+        /// <summary>
+        /// Pre-initializes the cached Desktop IShellFolderViewDual COM proxy and DLR call sites
+        /// so the first Desktop double-click resolves rapidly.
+        /// </summary>
+        public static void WarmUpDesktopViewCache()
+        {
+            try
+            {
+                TryGetDesktopFolderPathAtClick(new IntPtr(1), 0, new Win32Helper.POINT());
+            }
+            catch { }
+        }
+
+        private static dynamic GetDesktopFolderViewDocument(bool forceRefresh)
+        {
+            if (!forceRefresh && s_cachedDesktopDoc != null)
+            {
+                return s_cachedDesktopDoc;
+            }
+
+            object shellWindowsObj = null;
+            try
+            {
+                Type shellWindowsType = Type.GetTypeFromCLSID(CLSID_ShellWindows);
+                if (shellWindowsType == null) return null;
+
+                shellWindowsObj = Activator.CreateInstance(shellWindowsType);
+                IShellWindows shellWindows = shellWindowsObj as IShellWindows;
+                if (shellWindows == null) return null;
+
+                object emptyLoc = null;
+                object emptyRoot = null;
+                int deskHwnd = 0;
+                object topDisp = null;
+                int hr = shellWindows.FindWindowSW(ref emptyLoc, ref emptyRoot, SWC_DESKTOP, out deskHwnd, SWFO_NEEDDISPATCH, out topDisp);
+                if (hr < 0 || topDisp == null) return null;
+
+                dynamic doc = ((dynamic)topDisp).Document;
+                s_cachedDesktopDoc = doc;
+                return doc;
+            }
+            catch
+            {
+                s_cachedDesktopDoc = null;
+                return null;
+            }
+            finally
+            {
+                if (shellWindowsObj != null && Marshal.IsComObject(shellWindowsObj))
+                {
+                    try { Marshal.ReleaseComObject(shellWindowsObj); } catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Resolves the target folder path (or virtual shell CLSID like This PC / Recycle Bin)
+        /// for the clicked desktop item using automation-marshaled IShellFolderViewDual, or null
+        /// if the item is not a redirectable folder.
+        /// </summary>
+        public static string TryGetDesktopFolderPathAtClick(IntPtr listViewHwnd, int itemIndex, Win32Helper.POINT screenPt)
+        {
+            if (listViewHwnd == IntPtr.Zero || itemIndex < 0) return null;
+
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    dynamic doc = GetDesktopFolderViewDocument(attempt > 0);
+                    if (doc == null) return null;
+
+                    dynamic item = doc.FocusedItem;
+                    if (item == null)
+                    {
+                        dynamic sel = doc.SelectedItems();
+                        if (sel != null && (int)sel.Count == 1)
+                        {
+                            item = sel.Item(0);
+                        }
+                    }
+
+                    return ExtractDesktopFolderItemPath(item);
+                }
+                catch
+                {
+                    s_cachedDesktopDoc = null;
+                }
+            }
+
+            return null;
+        }
+
+        private static string ExtractDesktopFolderItemPath(dynamic item)
+        {
+            if (item == null) return null;
+
+            bool isLink = false;
+            try { isLink = (bool)item.IsLink; } catch { }
+
+            if (isLink)
+            {
+                try
+                {
+                    dynamic link = item.GetLink;
+                    if (link != null)
+                    {
+                        string args = null;
+                        try { args = (string)link.Arguments; } catch { }
+                        if (!string.IsNullOrWhiteSpace(args)) return null;
+
+                        string linkTargetPath = null;
+                        try { linkTargetPath = (string)link.Path; } catch { }
+                        if (!string.IsNullOrWhiteSpace(linkTargetPath)
+                            && Directory.Exists(linkTargetPath)
+                            && !IsControlPanelClsidPath(linkTargetPath))
+                        {
+                            return linkTargetPath;
+                        }
+
+                        dynamic targetItem = null;
+                        try { targetItem = link.Target; } catch { }
+                        if (targetItem != null)
+                        {
+                            bool targetIsFolder = false;
+                            string targetPath = null;
+                            try { targetIsFolder = (bool)targetItem.IsFolder; } catch { }
+                            try { targetPath = (string)targetItem.Path; } catch { }
+                            if (targetIsFolder
+                                && !string.IsNullOrWhiteSpace(targetPath)
+                                && !IsControlPanelClsidPath(targetPath)
+                                && (targetPath.StartsWith("::", StringComparison.Ordinal)
+                                    || targetPath.StartsWith("shell:::", StringComparison.OrdinalIgnoreCase)
+                                    || Directory.Exists(targetPath)))
+                            {
+                                return targetPath;
+                            }
+                        }
+                    }
+                }
+                catch { }
+                return null;
+            }
+
+            bool isFolder = false;
+            try { isFolder = (bool)item.IsFolder; } catch { }
+            if (!isFolder) return null;
+
+            string path = null;
+            try { path = (string)item.Path; } catch { }
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            if (IsControlPanelClsidPath(path)) return null;
+
+            if (path.StartsWith("::", StringComparison.Ordinal)
+                || path.StartsWith("shell:::", StringComparison.OrdinalIgnoreCase)
+                || Directory.Exists(path))
+            {
+                return path;
+            }
+
+            return null;
+        }
+
+        private static bool IsControlPanelClsidPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return path.IndexOf("26EE0668", StringComparison.OrdinalIgnoreCase) >= 0
+                || path.IndexOf("5399E694", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
 
         public static IntPtr GetActiveShellTabHwnd(IntPtr explorerHwnd)
         {
@@ -233,40 +403,6 @@ namespace ExplorerBookmarkBar.Services
                                             else
                                             {
                                                 match.TabHwnd = GetShellTabAncestor(browserHwnd, targetHwnd);
-                                            }
-                                        }
-                                    }
-
-                                    // Extract path from IFolderView -> IShellItem
-                                    IFolderView fv = Marshal.GetObjectForIUnknown(pView) as IFolderView;
-                                    if (fv != null)
-                                    {
-                                        IntPtr pItem = IntPtr.Zero;
-                                        Guid itemGuid = IID_IShellItem;
-                                        if (fv.GetFolder(ref itemGuid, out pItem) == 0 && pItem != IntPtr.Zero)
-                                        {
-                                            try
-                                            {
-                                                IShellItem item = Marshal.GetObjectForIUnknown(pItem) as IShellItem;
-                                                if (item != null)
-                                                {
-                                                    IntPtr ppsz = IntPtr.Zero;
-                                                    if (item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, out ppsz) == 0 && ppsz != IntPtr.Zero)
-                                                    {
-                                                        try
-                                                        {
-                                                            match.ShellItemPath = Marshal.PtrToStringUni(ppsz);
-                                                        }
-                                                        finally
-                                                        {
-                                                            CoTaskMemFree(ppsz);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            finally
-                                            {
-                                                Marshal.Release(pItem);
                                             }
                                         }
                                     }
@@ -461,7 +597,11 @@ namespace ExplorerBookmarkBar.Services
                 return match.ShellItemPath;
             }
 
-            dynamic win = match.Win;
+            return ExtractPathFromWin(match.Win);
+        }
+
+        private static string ExtractPathFromWin(dynamic win)
+        {
             if (win == null) return string.Empty;
 
             try
@@ -614,12 +754,17 @@ namespace ExplorerBookmarkBar.Services
                 dynamic windows = shell.Windows();
                 if (windows == null || windows.Count == 0) return null;
 
+                long targetId = explorerHwnd.ToInt64();
                 for (int i = windows.Count - 1; i >= 0; i--)
                 {
                     try
                     {
                         dynamic win = windows.Item(i);
                         if (win == null) continue;
+
+                        long winHwnd = 0;
+                        try { winHwnd = (long)win.HWND; } catch { }
+                        if (winHwnd != 0 && winHwnd != targetId) continue;
 
                         BrowserTabMatch info = GetTabInfoFromBrowser(win, explorerHwnd);
                         if (info != null && info.TabHwnd == tabHwnd)
@@ -644,19 +789,24 @@ namespace ExplorerBookmarkBar.Services
                 ? FindBrowserTabByHwnd(explorerHwnd, tabHwnd)
                 : FindActiveBrowserTab(explorerHwnd);
 
-            if (match == null) return false;
+            return NavigateBrowserTabMatch(match, normalized, selectedNames);
+        }
+
+        private static bool NavigateBrowserTabMatch(BrowserTabMatch match, string normalizedPath, string[] selectedNames)
+        {
+            if (match == null || string.IsNullOrEmpty(normalizedPath)) return false;
 
             bool navigated = false;
             if (match.Browser != null)
             {
-                navigated = NavigateWithShellBrowser(match.Browser, normalized);
+                navigated = NavigateWithShellBrowser(match.Browser, normalizedPath);
             }
 
             if (!navigated && match.Win != null)
             {
                 try
                 {
-                    match.Win.Navigate2(normalized);
+                    match.Win.Navigate2(normalizedPath);
                     navigated = true;
                 }
                 catch { }
@@ -1120,7 +1270,366 @@ namespace ExplorerBookmarkBar.Services
             return aHome && bHome;
         }
 
-        public static void OpenInNewTab(IntPtr targetHwnd, string path, string[] selectedNames = null)
+        private static readonly HashSet<IntPtr> _claimedNewTabHwnds = new HashSet<IntPtr>();
+        private static readonly HashSet<IntPtr> _claimedWinUnknowns = new HashSet<IntPtr>();
+
+        private static IntPtr GetComUnknownPtr(object comObj)
+        {
+            if (comObj == null) return IntPtr.Zero;
+            try
+            {
+                IntPtr unk = Marshal.GetIUnknownForObject(comObj);
+                if (unk != IntPtr.Zero)
+                {
+                    Marshal.Release(unk);
+                }
+                return unk;
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+
+        private static HashSet<IntPtr> SnapshotExistingBrowserUnknowns(IntPtr targetHwnd, out List<object> pinnedWins)
+        {
+            var result = new HashSet<IntPtr>();
+            pinnedWins = new List<object>();
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellType == null) return result;
+                dynamic shell = Activator.CreateInstance(shellType);
+                dynamic windows = shell.Windows();
+                if (windows == null) return result;
+
+                long targetId = targetHwnd.ToInt64();
+                int count = windows.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        dynamic win = windows.Item(i);
+                        if (win == null) continue;
+                        long winHwnd = 0;
+                        try { winHwnd = (long)win.HWND; } catch { }
+                        if (winHwnd != targetId) continue;
+
+                        IntPtr unk = GetComUnknownPtr(win);
+                        if (unk != IntPtr.Zero)
+                        {
+                            result.Add(unk);
+                            pinnedWins.Add((object)win);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        private static dynamic FindNewCreatedBrowserWindow(
+            IntPtr targetHwnd,
+            IntPtr capturedNewTabHwnd,
+            HashSet<IntPtr> existingWinUnknowns,
+            bool allowUnmatchedSingleWin,
+            out IntPtr foundWinUnk)
+        {
+            foundWinUnk = IntPtr.Zero;
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellType == null) return null;
+                dynamic shell = Activator.CreateInstance(shellType);
+                dynamic windows = shell.Windows();
+                if (windows == null || windows.Count == 0) return null;
+
+                long targetId = targetHwnd.ToInt64();
+                dynamic fallbackWin = null;
+                IntPtr fallbackUnk = IntPtr.Zero;
+                int fallbackCount = 0;
+
+                for (int i = windows.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        dynamic win = windows.Item(i);
+                        if (win == null) continue;
+                        long winHwnd = 0;
+                        try { winHwnd = (long)win.HWND; } catch { }
+                        if (winHwnd != targetId) continue;
+
+                        IntPtr unk = GetComUnknownPtr(win);
+                        if (unk == IntPtr.Zero) continue;
+                        if (existingWinUnknowns.Contains(unk) || _claimedWinUnknowns.Contains(unk)) continue;
+
+                        if (capturedNewTabHwnd != IntPtr.Zero)
+                        {
+                            BrowserTabMatch info = GetTabInfoFromBrowser(win, targetHwnd);
+                            if (info != null && info.TabHwnd == capturedNewTabHwnd)
+                            {
+                                foundWinUnk = unk;
+                                return win;
+                            }
+                        }
+
+                        if (fallbackWin == null)
+                        {
+                            fallbackWin = win;
+                            fallbackUnk = unk;
+                        }
+                        fallbackCount++;
+                    }
+                    catch { }
+                }
+
+                // Wait for TabHwnd match normally so the new tab's IShellView is initialized before navigating.
+                // Only use single unmatched new COM window after initial settle if TabHwnd still hasn't resolved.
+                if (allowUnmatchedSingleWin && fallbackCount == 1 && fallbackWin != null)
+                {
+                    foundWinUnk = fallbackUnk;
+                    return fallbackWin;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool NavigateNewTabComWindow(dynamic newWin, string normalizedPath, string[] selectedNames)
+        {
+            if (newWin == null || string.IsNullOrEmpty(normalizedPath)) return false;
+
+            bool navigated = false;
+            try
+            {
+                // Navigate the specific IWebBrowser2 tab object directly so SID_STopLevelBrowser
+                // can never route navigation to the previous active tab during tab transition.
+                newWin.Navigate2(normalizedPath);
+                navigated = true;
+            }
+            catch { }
+
+            if (!navigated)
+            {
+                try
+                {
+                    IServiceProvider sp = newWin as IServiceProvider;
+                    if (sp != null)
+                    {
+                        IntPtr pBrowser = IntPtr.Zero;
+                        Guid sId = SID_SShellBrowser;
+                        Guid rId = IID_IShellBrowser;
+                        if (sp.QueryService(ref sId, ref rId, out pBrowser) == 0 && pBrowser != IntPtr.Zero)
+                        {
+                            IShellBrowser sb = Marshal.GetObjectForIUnknown(pBrowser) as IShellBrowser;
+                            if (sb != null)
+                            {
+                                navigated = NavigateWithShellBrowser(sb, normalizedPath);
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (navigated && selectedNames != null && selectedNames.Length > 0)
+            {
+                // May run on a background thread: select items there instead of using a DispatcherTimer.
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        System.Threading.Thread.Sleep(220);
+                        TrySelectItems(newWin, selectedNames);
+                    }
+                    catch { }
+                });
+            }
+
+            return navigated;
+        }
+
+        private static List<AutomationElement> GetHeaderTabItems(IntPtr explorerHwnd)
+        {
+            var result = new List<AutomationElement>();
+            if (explorerHwnd == IntPtr.Zero || !Win32Helper.IsWindow(explorerHwnd)) return result;
+
+            try
+            {
+                var tabCond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Tab);
+                var tabItemCond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem);
+
+                // Primary: walk immediate UIA children of CabinetWClass and skip ShellTabWindowClass
+                // (WinUI 3 XAML Islands TabView is exposed under CabinetWClass's UIA tree, not always the raw bridge HWND).
+                AutomationElement winEl = AutomationElement.FromHandle(explorerHwnd);
+                if (winEl != null)
+                {
+                    var walker = TreeWalker.ControlViewWalker;
+                    AutomationElement child = walker.GetFirstChild(winEl);
+                    while (child != null)
+                    {
+                        string childCls = string.Empty;
+                        try { childCls = child.Current.ClassName ?? string.Empty; } catch { }
+
+                        if (childCls != "ShellTabWindowClass" &&
+                            childCls != "TabWindowClass" &&
+                            !childCls.StartsWith("ExplorerBookmarkBar", StringComparison.OrdinalIgnoreCase))
+                        {
+                            ControlType ct = null;
+                            try { ct = child.Current.ControlType; } catch { }
+                            AutomationElement tabStrip = (ct == ControlType.Tab)
+                                ? child
+                                : child.FindFirst(TreeScope.Descendants, tabCond);
+
+                            if (tabStrip != null)
+                            {
+                                AutomationElementCollection items = tabStrip.FindAll(TreeScope.Children, tabItemCond);
+                                if (items == null || items.Count == 0)
+                                {
+                                    items = tabStrip.FindAll(TreeScope.Descendants, tabItemCond);
+                                }
+                                if (items != null && items.Count > 0)
+                                {
+                                    for (int t = 0; t < items.Count; t++) result.Add(items[t]);
+                                    return result;
+                                }
+                            }
+                            else
+                            {
+                                AutomationElementCollection directItems = child.FindAll(TreeScope.Descendants, tabItemCond);
+                                if (directItems != null && directItems.Count > 0)
+                                {
+                                    for (int t = 0; t < directItems.Count; t++) result.Add(directItems[t]);
+                                    return result;
+                                }
+                            }
+                        }
+
+                        try { child = walker.GetNextSibling(child); }
+                        catch { break; }
+                    }
+                }
+            }
+            catch { }
+
+            return result;
+        }
+
+        private static AutomationElement GetSelectedTabElement(IntPtr explorerHwnd, out int selectedIndex)
+        {
+            selectedIndex = -1;
+            try
+            {
+                var items = GetHeaderTabItems(explorerHwnd);
+                for (int i = 0; i < items.Count; i++)
+                {
+                    object patObj;
+                    if (items[i].TryGetCurrentPattern(SelectionItemPattern.Pattern, out patObj))
+                    {
+                        var selPat = patObj as SelectionItemPattern;
+                        if (selPat != null && selPat.Current.IsSelected)
+                        {
+                            selectedIndex = i;
+                            return items[i];
+                        }
+                    }
+                }
+                App.Log("GetSelectedTabElement: found " + items.Count + " TabItems, none reported IsSelected.");
+            }
+            catch (Exception ex)
+            {
+                App.Log("GetSelectedTabElement error: " + ex.Message);
+            }
+            return null;
+        }
+
+        private static bool TrySelectAutomationTab(AutomationElement tabEl)
+        {
+            if (tabEl == null) return false;
+            try
+            {
+                object patObj;
+                if (tabEl.TryGetCurrentPattern(SelectionItemPattern.Pattern, out patObj))
+                {
+                    var selPat = patObj as SelectionItemPattern;
+                    if (selPat != null)
+                    {
+                        if (!selPat.Current.IsSelected)
+                        {
+                            selPat.Select();
+                        }
+                        // Return immediately once Select() succeeded; checking Current.IsSelected synchronously
+                        // before WinUI dispatches selection previously caused redundant Invoke/Ctrl+1 fallbacks.
+                        return true;
+                    }
+                }
+
+                if (tabEl.TryGetCurrentPattern(InvokePattern.Pattern, out patObj))
+                {
+                    var invPat = patObj as InvokePattern;
+                    if (invPat != null)
+                    {
+                        invPat.Invoke();
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool IsAutomationTabSelected(AutomationElement tabEl)
+        {
+            if (tabEl == null) return false;
+            try
+            {
+                object patObj;
+                if (tabEl.TryGetCurrentPattern(SelectionItemPattern.Pattern, out patObj))
+                {
+                    var selPat = patObj as SelectionItemPattern;
+                    if (selPat != null)
+                    {
+                        return selPat.Current.IsSelected;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static void EnsureTabSelected(IntPtr explorerHwnd, AutomationElement prevTabElement, int prevTabIndex, bool allowShortcutFallback)
+        {
+            if (TrySelectAutomationTab(prevTabElement)) return;
+            if (prevTabIndex < 0) return;
+
+            try
+            {
+                var items = GetHeaderTabItems(explorerHwnd);
+                if (prevTabIndex >= 0 && prevTabIndex < items.Count)
+                {
+                    if (TrySelectAutomationTab(items[prevTabIndex])) return;
+                }
+            }
+            catch { }
+
+            // Last-resort shortcut fallback (Ctrl+1..8) only on first restore if UIA failed completely
+            if (allowShortcutFallback && prevTabIndex >= 0 && prevTabIndex <= 7 && Win32Helper.GetForegroundWindow() == explorerHwnd)
+            {
+                try
+                {
+                    App.Log("EnsureTabSelected: falling back to Ctrl+" + (prevTabIndex + 1) + " shortcut.");
+                    byte vkDigit = (byte)(0x31 + prevTabIndex); // '1'..'8'
+                    Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
+                    Win32Helper.keybd_event(vkDigit, 0, 0, UIntPtr.Zero);
+                    Win32Helper.keybd_event(vkDigit, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                    Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                }
+                catch { }
+            }
+        }
+
+        public static void OpenInNewTab(IntPtr targetHwnd, string path, string[] selectedNames = null, bool activateNewTab = true)
         {
             if (string.IsNullOrEmpty(path)) return;
 
@@ -1154,126 +1663,232 @@ namespace ExplorerBookmarkBar.Services
                 return;
             }
 
+            if (activateNewTab)
+            {
+                OpenInNewTabCore(targetHwnd, path, selectedNames, true, null, -1);
+                return;
+            }
+
+            // NEVER call UIAutomation synchronously on the UI thread hosting a WS_CHILD of CabinetWClass;
+            // capture the currently selected TabItem on a background MTA thread, then dispatch back.
+            IntPtr capturedTarget = targetHwnd;
+            string capturedPath = path;
+            string[] capturedSelected = selectedNames;
+            Task.Run(() =>
+            {
+                int prevIdx = -1;
+                AutomationElement prevEl = GetSelectedTabElement(capturedTarget, out prevIdx);
+                System.Windows.Application app = System.Windows.Application.Current;
+                if (app != null && app.Dispatcher != null)
+                {
+                    app.Dispatcher.BeginInvoke(new Action(() =>
+                        OpenInNewTabCore(capturedTarget, capturedPath, capturedSelected, false, prevEl, prevIdx)));
+                }
+            });
+        }
+
+        private static readonly object _claimLock = new object();
+
+        [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint ms);
+
+        /// <summary>Sleeps ~ms milliseconds but re-pins the bookmark bar / tab layout roughly every millisecond.</summary>
+        private static void PinnedSleep(IntPtr explorerHwnd, int ms)
+        {
+            var sw = Stopwatch.StartNew();
+            do
+            {
+                ExplorerChildBarManager.Instance.PinAllNow(explorerHwnd);
+                System.Threading.Thread.Sleep(1);
+            }
+            while (sw.ElapsedMilliseconds < ms);
+        }
+
+        private static void OpenInNewTabCore(
+            IntPtr targetHwnd,
+            string path,
+            string[] selectedNames,
+            bool activateNewTab,
+            AutomationElement prevTabElement,
+            int prevTabIndex)
+        {
             try
             {
-                // Ensure WPF button releases keyboard focus
+                if (!Win32Helper.IsWindow(targetHwnd))
+                {
+                    OpenInNewWindow(path);
+                    return;
+                }
+
+                // Ensure WPF button releases keyboard focus (UI thread only)
                 try { System.Windows.Input.Keyboard.ClearFocus(); } catch { }
 
-                Win32Helper.RestoreWindowToForeground(targetHwnd);
-
-                // Trigger Explorer's native Ctrl+T command (0xA21B) directly on ShellTabWindowClass
-                Win32Helper.PostMessage(existingTabs[0], Win32Helper.WM_COMMAND, (IntPtr)0xA21B, IntPtr.Zero);
-
-                var existingSet = new System.Collections.Generic.HashSet<IntPtr>(existingTabs);
-                IntPtr capturedNewTabHwnd = IntPtr.Zero;
-                int tabAppearAttempt = -1;
-                int attempts = 0;
-                const int maxAttempts = 72; // ~1.8s at 25ms interval
-                bool fallbackCtrlTSent = false;
-
-                var timer = new System.Windows.Threading.DispatcherTimer();
-                timer.Interval = TimeSpan.FromMilliseconds(25);
-                timer.Tick += (s, e) =>
-                {
-                    attempts++;
-                    try
-                    {
-                        if (!Win32Helper.IsWindow(targetHwnd))
-                        {
-                            timer.Stop();
-                            return;
-                        }
-
-                        if (capturedNewTabHwnd == IntPtr.Zero)
-                        {
-                            var currentTabs = Win32Helper.GetExplorerTabs(targetHwnd);
-                            for (int i = 0; i < currentTabs.Count; i++)
-                            {
-                                if (!existingSet.Contains(currentTabs[i]))
-                                {
-                                    capturedNewTabHwnd = currentTabs[i];
-                                    tabAppearAttempt = attempts;
-                                    break;
-                                }
-                            }
-
-                            // If 0xA21B did not spawn a tab within ~400ms, retry once with Ctrl+T
-                            if (capturedNewTabHwnd == IntPtr.Zero && !fallbackCtrlTSent && attempts >= 16)
-                            {
-                                fallbackCtrlTSent = true;
-                                App.Log("OpenInNewTab: 0xA21B did not create a tab within 400ms; sending Ctrl+T fallback.");
-                                Win32Helper.RestoreWindowToForeground(targetHwnd);
-                                Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
-                                Win32Helper.keybd_event(0x54 /* VK_T */, 0, 0, UIntPtr.Zero);
-                                Win32Helper.keybd_event(0x54 /* VK_T */, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                                Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                            }
-                        }
-
-                        if (capturedNewTabHwnd != IntPtr.Zero)
-                        {
-                            var tabMatch = FindBrowserTabByHwnd(targetHwnd, capturedNewTabHwnd);
-                            string readyPath = tabMatch != null ? ExtractPathFromMatch(tabMatch) : string.Empty;
-                            bool waitedEnough = (attempts - tabAppearAttempt) >= 8; // ~200ms settle for default tab nav
-
-                            if (tabMatch != null && (!string.IsNullOrEmpty(readyPath) || waitedEnough))
-                            {
-                                if (NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames))
-                                {
-                                    timer.Stop();
-                                    Win32Helper.RestoreWindowToForeground(targetHwnd);
-
-                                    // Re-verify ~180ms later so Explorer's default new-tab page does not overwrite target path
-                                    var verifyTimer = new System.Windows.Threading.DispatcherTimer();
-                                    verifyTimer.Interval = TimeSpan.FromMilliseconds(180);
-                                    verifyTimer.Tick += (vs, ve) =>
-                                    {
-                                        verifyTimer.Stop();
-                                        try
-                                        {
-                                            if (!Win32Helper.IsWindow(targetHwnd) || !Win32Helper.IsWindow(capturedNewTabHwnd)) return;
-                                            var checkMatch = FindBrowserTabByHwnd(targetHwnd, capturedNewTabHwnd);
-                                            string currentPath = checkMatch != null ? ExtractPathFromMatch(checkMatch) : string.Empty;
-                                            if (!PathsRoughlyEqual(currentPath, path))
-                                            {
-                                                NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames);
-                                            }
-                                            Win32Helper.RestoreWindowToForeground(targetHwnd);
-                                        }
-                                        catch { }
-                                    };
-                                    verifyTimer.Start();
-                                    return;
-                                }
-                            }
-                        }
-
-                        if (attempts >= maxAttempts)
-                        {
-                            timer.Stop();
-                            if (capturedNewTabHwnd != IntPtr.Zero)
-                            {
-                                NavigateTabByHwnd(targetHwnd, capturedNewTabHwnd, path, selectedNames);
-                            }
-                            else
-                            {
-                                NavigateActiveExplorer(targetHwnd, path);
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        if (attempts >= maxAttempts)
-                        {
-                            timer.Stop();
-                        }
-                    }
-                };
-                timer.Start();
+                // IMPORTANT: everything below (Shell.Windows COM enumeration, polling) runs on a background
+                // thread. Doing it on the UI thread blocks the bookmark bar's own message loop, so the bar
+                // could not repaint after Explorer covered it -> visible flash while a tab was opening.
+                Task.Run(() => OpenInNewTabWorker(targetHwnd, path, selectedNames, activateNewTab, prevTabElement, prevTabIndex));
             }
             catch
             {
                 OpenInNewWindow(path);
+            }
+        }
+
+        private static void OpenInNewTabWorker(
+            IntPtr targetHwnd,
+            string path,
+            string[] selectedNames,
+            bool activateNewTab,
+            AutomationElement prevTabElement,
+            int prevTabIndex)
+        {
+            IntPtr capturedNewTabHwnd = IntPtr.Zero;
+            IntPtr claimedWinUnk = IntPtr.Zero;
+            List<object> pinnedExistingWins = null;
+            timeBeginPeriod(1);
+            try
+            {
+                var existingTabs = Win32Helper.GetExplorerTabs(targetHwnd);
+                if (existingTabs.Count == 0)
+                {
+                    OpenInNewWindow(path);
+                    return;
+                }
+
+                if (Win32Helper.GetForegroundWindow() != targetHwnd)
+                {
+                    Win32Helper.RestoreWindowToForeground(targetHwnd);
+                }
+
+                IntPtr activeTabBefore = GetActiveShellTabHwnd(targetHwnd);
+                if (activeTabBefore == IntPtr.Zero) activeTabBefore = existingTabs[0];
+
+                var existingSet = new HashSet<IntPtr>(existingTabs);
+                HashSet<IntPtr> existingWinUnknowns = SnapshotExistingBrowserUnknowns(targetHwnd, out pinnedExistingWins);
+
+                // Trigger Explorer's native Ctrl+T command (0xA21B) on the active ShellTabWindowClass
+                Win32Helper.PostMessage(activeTabBefore, Win32Helper.WM_COMMAND, (IntPtr)0xA21B, IntPtr.Zero);
+
+                dynamic createdWin = null;
+                const int maxAttempts = 150; // ~1.5s at 10ms interval
+                bool fallbackCtrlTSent = false;
+                bool earlyRestoreDone = false;
+
+                for (int attempts = 1; attempts <= maxAttempts; attempts++)
+                {
+                    PinnedSleep(targetHwnd, 10);
+
+                    if (!Win32Helper.IsWindow(targetHwnd)) return;
+
+                    if (capturedNewTabHwnd == IntPtr.Zero)
+                    {
+                        var currentTabs = Win32Helper.GetExplorerTabs(targetHwnd);
+                        for (int i = 0; i < currentTabs.Count; i++)
+                        {
+                            IntPtr tab = currentTabs[i];
+                            if (existingSet.Contains(tab)) continue;
+                            lock (_claimLock)
+                            {
+                                if (_claimedNewTabHwnds.Contains(tab)) continue;
+                                _claimedNewTabHwnds.Add(tab);
+                            }
+                            capturedNewTabHwnd = tab;
+                            break;
+                        }
+
+                        // If 0xA21B did not spawn a tab within ~400ms, retry once with Ctrl+T
+                        if (capturedNewTabHwnd == IntPtr.Zero && !fallbackCtrlTSent && attempts >= 40)
+                        {
+                            fallbackCtrlTSent = true;
+                            App.Log("OpenInNewTab: 0xA21B did not create a tab within 400ms; sending Ctrl+T fallback.");
+                            Win32Helper.RestoreWindowToForeground(targetHwnd);
+                            Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
+                            Win32Helper.keybd_event(0x54 /* VK_T */, 0, 0, UIntPtr.Zero);
+                            Win32Helper.keybd_event(0x54 /* VK_T */, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                            Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        }
+                    }
+
+                    if (capturedNewTabHwnd == IntPtr.Zero) continue;
+
+                    if (!activateNewTab && !earlyRestoreDone)
+                    {
+                        // Switch back to the previous tab the instant the new tab exists (before navigation).
+                        earlyRestoreDone = true;
+                        if (prevTabIndex >= 0 && prevTabIndex <= 7 && Win32Helper.GetForegroundWindow() == targetHwnd)
+                        {
+                            byte vkDigit = (byte)(0x31 + prevTabIndex);
+                            Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, 0, UIntPtr.Zero);
+                            Win32Helper.keybd_event(vkDigit, 0, 0, UIntPtr.Zero);
+                            Win32Helper.keybd_event(vkDigit, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                            Win32Helper.keybd_event(Win32Helper.VK_CONTROL, 0, Win32Helper.KEYEVENTF_KEYUP, UIntPtr.Zero);
+                        }
+                        else if (!IsAutomationTabSelected(prevTabElement))
+                        {
+                            EnsureTabSelected(targetHwnd, prevTabElement, prevTabIndex, false);
+                        }
+                    }
+
+                    IntPtr foundUnk;
+                    dynamic foundWin = FindNewCreatedBrowserWindow(
+                        targetHwnd, capturedNewTabHwnd, existingWinUnknowns, attempts >= 15, out foundUnk);
+                    if (foundWin == null || foundUnk == IntPtr.Zero) continue;
+
+                    createdWin = foundWin;
+                    claimedWinUnk = foundUnk;
+                    lock (_claimLock) { _claimedWinUnknowns.Add(foundUnk); }
+
+                    if (!NavigateNewTabComWindow(createdWin, path, selectedNames)) continue;
+
+                    if (activateNewTab && Win32Helper.GetForegroundWindow() != targetHwnd)
+                    {
+                        Win32Helper.RestoreWindowToForeground(targetHwnd);
+                    }
+
+                    // Re-verify (60ms x 4) so Explorer's default Home navigation neither overwrites the target
+                    // path nor leaves the new tab active on background open.
+                    for (int v = 0; v < 4; v++)
+                    {
+                        PinnedSleep(targetHwnd, 60);
+                        if (!Win32Helper.IsWindow(targetHwnd) || !Win32Helper.IsWindow(capturedNewTabHwnd)) return;
+
+                        string currentPath = ExtractPathFromWin(createdWin);
+                        if (!PathsRoughlyEqual(currentPath, path))
+                        {
+                            NavigateNewTabComWindow(createdWin, path, selectedNames);
+                        }
+
+                        if (!activateNewTab && !IsAutomationTabSelected(prevTabElement))
+                        {
+                            EnsureTabSelected(targetHwnd, prevTabElement, prevTabIndex, false);
+                        }
+                    }
+                    return;
+                }
+
+                // Timed out
+                if (capturedNewTabHwnd == IntPtr.Zero)
+                {
+                    // Never touch the current tab if the new tab failed to spawn
+                    OpenInNewWindow(path);
+                }
+            }
+            catch
+            {
+                if (capturedNewTabHwnd == IntPtr.Zero)
+                {
+                    OpenInNewWindow(path);
+                }
+            }
+            finally
+            {
+                lock (_claimLock)
+                {
+                    if (capturedNewTabHwnd != IntPtr.Zero) _claimedNewTabHwnds.Remove(capturedNewTabHwnd);
+                    if (claimedWinUnk != IntPtr.Zero) _claimedWinUnknowns.Remove(claimedWinUnk);
+                }
+                if (pinnedExistingWins != null) pinnedExistingWins.Clear();
+                timeEndPeriod(1);
             }
         }
 

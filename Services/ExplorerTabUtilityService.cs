@@ -35,7 +35,23 @@ namespace ExplorerBookmarkBar.Services
         private readonly Dictionary<IntPtr, RedirectState> _redirectingWindows = new Dictionary<IntPtr, RedirectState>();
 
         private IntPtr _winEventHook;
+        private IntPtr _locHook;
+        private IntPtr _moveSizeHook;
         private Win32Helper.WinEventDelegate _winEventDelegate;
+        private IntPtr _mouseHook;
+        private Win32Helper.LowLevelMouseProc _mouseProc;
+        private Dispatcher _dispatcher;
+        private DispatcherTimer _desktopResolveTimer;
+        private IntPtr _lastDesktopClickListViewHwnd;
+        private Win32Helper.POINT _lastDesktopClickPt;
+        private uint _lastDesktopClickTimeMs;
+        private bool _hasDesktopClickCandidate;
+        private IntPtr _pendingDesktopListViewHwnd;
+        private int _pendingDesktopItemIndex = -1;
+        private string _pendingDesktopFolderPath;
+        private bool _pendingDesktopResolved;
+        private int _resolveGeneration;
+        private bool _swallowingSecondClick;
         private IntPtr _lastActiveExplorerHwnd;
         private int _lastTabDetachTick;
         private bool _isRunning;
@@ -53,18 +69,47 @@ namespace ExplorerBookmarkBar.Services
         {
             if (_isRunning) return;
             _isRunning = true;
+            _dispatcher = Dispatcher.CurrentDispatcher;
 
             SeedKnownWindows();
 
             _winEventDelegate = OnWinEvent;
             _winEventHook = Win32Helper.SetWinEventHook(
                 Win32Helper.EVENT_OBJECT_CREATE,
-                Win32Helper.EVENT_OBJECT_SHOW,
+                Win32Helper.EVENT_OBJECT_REORDER,
                 IntPtr.Zero,
                 _winEventDelegate,
                 0,
                 0,
                 Win32Helper.WINEVENT_OUTOFCONTEXT | Win32Helper.WINEVENT_SKIPOWNPROCESS);
+
+            _locHook = Win32Helper.SetWinEventHook(
+                0x800B, // EVENT_OBJECT_LOCATIONCHANGE
+                0x800B,
+                IntPtr.Zero,
+                _winEventDelegate,
+                0,
+                0,
+                Win32Helper.WINEVENT_OUTOFCONTEXT | Win32Helper.WINEVENT_SKIPOWNPROCESS);
+
+            _moveSizeHook = Win32Helper.SetWinEventHook(
+                0x000A, // EVENT_SYSTEM_MOVESIZESTART
+                0x000B, // EVENT_SYSTEM_MOVESIZEEND
+                IntPtr.Zero,
+                _winEventDelegate,
+                0,
+                0,
+                Win32Helper.WINEVENT_OUTOFCONTEXT | Win32Helper.WINEVENT_SKIPOWNPROCESS);
+
+            _mouseProc = MouseHookProc;
+            using (var curProcess = System.Diagnostics.Process.GetCurrentProcess())
+            using (var curModule = curProcess.MainModule)
+            {
+                IntPtr hMod = Win32Helper.GetModuleHandle(curModule != null ? curModule.ModuleName : null);
+                _mouseHook = Win32Helper.SetWindowsHookEx(Win32Helper.WH_MOUSE_LL, _mouseProc, hMod, 0);
+            }
+
+            DispatchUiAction(delegate { ExplorerComHelper.WarmUpDesktopViewCache(); });
 
             App.Log("ExplorerTabUtilityService started.");
         }
@@ -74,12 +119,36 @@ namespace ExplorerBookmarkBar.Services
             if (!_isRunning) return;
             _isRunning = false;
 
+            if (_desktopResolveTimer != null)
+            {
+                _desktopResolveTimer.Stop();
+                _desktopResolveTimer = null;
+            }
+
+            if (_mouseHook != IntPtr.Zero)
+            {
+                Win32Helper.UnhookWindowsHookEx(_mouseHook);
+                _mouseHook = IntPtr.Zero;
+            }
+            _mouseProc = null;
+            ResetDesktopClickTracking();
+
             if (_winEventHook != IntPtr.Zero)
             {
                 Win32Helper.UnhookWinEvent(_winEventHook);
                 _winEventHook = IntPtr.Zero;
             }
             _winEventDelegate = null;
+            if (_locHook != IntPtr.Zero)
+            {
+                Win32Helper.UnhookWinEvent(_locHook);
+                _locHook = IntPtr.Zero;
+            }
+            if (_moveSizeHook != IntPtr.Zero)
+            {
+                Win32Helper.UnhookWinEvent(_moveSizeHook);
+                _moveSizeHook = IntPtr.Zero;
+            }
 
             foreach (var kvp in new List<KeyValuePair<IntPtr, RedirectState>>(_redirectingWindows))
             {
@@ -180,24 +249,361 @@ namespace ExplorerBookmarkBar.Services
             }
         }
 
+        private IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode < 0 || !_isRunning || lParam == IntPtr.Zero)
+            {
+                return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+            }
+
+            int msg = wParam.ToInt32();
+            if (msg == Win32Helper.WM_MBUTTONDOWN || msg == Win32Helper.WM_MBUTTONUP)
+            {
+                try
+                {
+                    var mbInfo = (Win32Helper.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                        lParam,
+                        typeof(Win32Helper.MSLLHOOKSTRUCT));
+                    IntPtr mbHit = Win32Helper.WindowFromPoint(mbInfo.pt);
+                    if (mbHit != IntPtr.Zero)
+                    {
+                        IntPtr mbRoot = Win32Helper.GetRootWindow(mbHit);
+                        if (mbRoot != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(mbRoot))
+                        {
+                            ExplorerChildBarManager.Instance.StartPinBurst(mbRoot, 850);
+                        }
+                    }
+                }
+                catch { }
+                return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+            }
+
+            if (msg != Win32Helper.WM_LBUTTONDOWN && msg != Win32Helper.WM_LBUTTONUP)
+            {
+                return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+            }
+
+            try
+            {
+                if (msg == Win32Helper.WM_LBUTTONUP)
+                {
+                    if (_swallowingSecondClick)
+                    {
+                        _swallowingSecondClick = false;
+                        return (IntPtr)1;
+                    }
+
+                    if (_hasDesktopClickCandidate && (!_pendingDesktopResolved || _pendingDesktopItemIndex < 0))
+                    {
+                        IntPtr lvUpHwnd = _lastDesktopClickListViewHwnd;
+                        Win32Helper.POINT ptUp = _lastDesktopClickPt;
+                        int genUp = _resolveGeneration;
+                        DispatchUiAction(delegate { ResolveDesktopClick(lvUpHwnd, ptUp, genUp); });
+                    }
+                    return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                // WM_LBUTTONDOWN
+                _swallowingSecondClick = false;
+
+                if (!BookmarkManager.Instance.Settings.OpenFoldersInNewTab || Win32Helper.IsAnyModifierDown())
+                {
+                    ResetDesktopClickTracking();
+                    return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                var info = (Win32Helper.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                    lParam,
+                    typeof(Win32Helper.MSLLHOOKSTRUCT));
+                if ((info.flags & Win32Helper.LLMHF_INJECTED) != 0)
+                {
+                    return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                IntPtr hitHwnd = Win32Helper.WindowFromPoint(info.pt);
+                IntPtr lvHwnd;
+                if (!Win32Helper.IsDesktopListView(hitHwnd, out lvHwnd))
+                {
+                    ResetDesktopClickTracking();
+                    return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                uint clickTime = info.time;
+                uint dblTime = Win32Helper.GetDoubleClickTime();
+                int cxHalf = Math.Max(6, Win32Helper.GetSystemMetrics(Win32Helper.SM_CXDOUBLECLK));
+                int cyHalf = Math.Max(6, Win32Helper.GetSystemMetrics(Win32Helper.SM_CYDOUBLECLK));
+
+                bool isSecondClickInTimeAndSpace = _hasDesktopClickCandidate
+                    && _lastDesktopClickListViewHwnd == lvHwnd
+                    && unchecked(clickTime - _lastDesktopClickTimeMs) <= dblTime
+                    && Math.Abs(info.pt.X - _lastDesktopClickPt.X) <= cxHalf
+                    && Math.Abs(info.pt.Y - _lastDesktopClickPt.Y) <= cyHalf;
+
+                if (isSecondClickInTimeAndSpace)
+                {
+                    if (Win32Helper.GetDesktopSelectedCount(lvHwnd) == 1)
+                    {
+                        int currentIdx = Win32Helper.GetDesktopPrimaryItemIndex(lvHwnd);
+                        if (currentIdx >= 0)
+                        {
+                            if (!_pendingDesktopResolved
+                                || _pendingDesktopListViewHwnd != lvHwnd
+                                || _pendingDesktopItemIndex != currentIdx)
+                            {
+                                _pendingDesktopFolderPath = ExplorerComHelper.TryGetDesktopFolderPathAtClick(lvHwnd, currentIdx, info.pt);
+                                _pendingDesktopListViewHwnd = lvHwnd;
+                                _pendingDesktopItemIndex = currentIdx;
+                                _pendingDesktopResolved = true;
+                            }
+
+                            if (!string.IsNullOrEmpty(_pendingDesktopFolderPath))
+                            {
+                                IntPtr hostHwnd = FindTargetExplorerWindow(IntPtr.Zero);
+                                if (hostHwnd != IntPtr.Zero)
+                                {
+                                    string targetPath = _pendingDesktopFolderPath;
+                                    ResetDesktopClickTracking();
+                                    _swallowingSecondClick = true;
+
+                                    DispatchUiAction(delegate { OpenDesktopFolderInExistingWindow(hostHwnd, targetPath); });
+                                    return (IntPtr)1;
+                                }
+                            }
+                        }
+                    }
+
+                    ResetDesktopClickTracking();
+                    return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                _lastDesktopClickListViewHwnd = lvHwnd;
+                _lastDesktopClickPt = info.pt;
+                _lastDesktopClickTimeMs = clickTime;
+                _hasDesktopClickCandidate = true;
+                _pendingDesktopListViewHwnd = lvHwnd;
+                _pendingDesktopItemIndex = -1;
+                _pendingDesktopFolderPath = null;
+                _pendingDesktopResolved = false;
+                int gen = ++_resolveGeneration;
+                Win32Helper.POINT capturedPt = info.pt;
+
+                DispatchUiAction(delegate { ScheduleDesktopClickResolve(lvHwnd, capturedPt, gen); });
+            }
+            catch (Exception ex)
+            {
+                App.Log("MouseHookProc error: " + ex.Message);
+            }
+
+            return Win32Helper.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
+
+        private void DispatchUiAction(Action action)
+        {
+            if (action == null) return;
+            Dispatcher dispatcher = _dispatcher;
+            if (dispatcher == null && System.Windows.Application.Current != null)
+            {
+                dispatcher = System.Windows.Application.Current.Dispatcher;
+            }
+            if (dispatcher != null)
+            {
+                dispatcher.BeginInvoke(DispatcherPriority.Normal, action);
+            }
+        }
+
+        private void ResetDesktopClickTracking()
+        {
+            _hasDesktopClickCandidate = false;
+            _lastDesktopClickListViewHwnd = IntPtr.Zero;
+            _lastDesktopClickPt = new Win32Helper.POINT();
+            _lastDesktopClickTimeMs = 0;
+            _pendingDesktopListViewHwnd = IntPtr.Zero;
+            _pendingDesktopItemIndex = -1;
+            _pendingDesktopFolderPath = null;
+            _pendingDesktopResolved = false;
+            _resolveGeneration++;
+            if (_desktopResolveTimer != null)
+            {
+                _desktopResolveTimer.Stop();
+            }
+        }
+
+        private void ScheduleDesktopClickResolve(IntPtr lvHwnd, Win32Helper.POINT clickPt, int gen)
+        {
+            if (!_isRunning || gen != _resolveGeneration || !_hasDesktopClickCandidate) return;
+
+            if (_desktopResolveTimer != null)
+            {
+                _desktopResolveTimer.Stop();
+            }
+
+            var timer = new DispatcherTimer(DispatcherPriority.Normal);
+            timer.Interval = TimeSpan.FromMilliseconds(5);
+            timer.Tick += (s, e) =>
+            {
+                timer.Stop();
+                ResolveDesktopClick(lvHwnd, clickPt, gen);
+            };
+            _desktopResolveTimer = timer;
+            timer.Start();
+        }
+
+        private void ResolveDesktopClick(IntPtr lvHwnd, Win32Helper.POINT clickPt, int gen)
+        {
+            if (!_isRunning || gen != _resolveGeneration || !_hasDesktopClickCandidate) return;
+            if (!Win32Helper.IsWindow(lvHwnd)) return;
+
+            int selCount = Win32Helper.GetDesktopSelectedCount(lvHwnd);
+            if (selCount != 1)
+            {
+                _pendingDesktopItemIndex = -1;
+                _pendingDesktopFolderPath = null;
+                _pendingDesktopResolved = false;
+                return;
+            }
+
+            int itemIndex = Win32Helper.GetDesktopPrimaryItemIndex(lvHwnd);
+            if (itemIndex < 0)
+            {
+                _pendingDesktopItemIndex = -1;
+                _pendingDesktopFolderPath = null;
+                _pendingDesktopResolved = false;
+                return;
+            }
+
+            string folderPath = ExplorerComHelper.TryGetDesktopFolderPathAtClick(lvHwnd, itemIndex, clickPt);
+            if (gen != _resolveGeneration || !_hasDesktopClickCandidate) return;
+
+            _pendingDesktopListViewHwnd = lvHwnd;
+            _pendingDesktopItemIndex = itemIndex;
+            _pendingDesktopFolderPath = folderPath;
+            _pendingDesktopResolved = true;
+        }
+
+        private void OpenDesktopFolderInExistingWindow(IntPtr preferredHostHwnd, string targetPath)
+        {
+            if (!_isRunning || string.IsNullOrEmpty(targetPath)) return;
+
+            IntPtr hostHwnd = IsValidTabHost(preferredHostHwnd, IntPtr.Zero)
+                ? preferredHostHwnd
+                : FindTargetExplorerWindow(IntPtr.Zero);
+            if (hostHwnd == IntPtr.Zero) return;
+
+            _lastActiveExplorerHwnd = hostHwnd;
+            App.Log("Direct desktop double-click opening '" + targetPath + "' in tab of " + hostHwnd);
+            ExplorerComHelper.OpenInNewTab(hostHwnd, targetPath, null);
+        }
+
         private void OnWinEvent(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
         {
             if (!_isRunning) return;
-            if (eventType != Win32Helper.EVENT_OBJECT_CREATE && eventType != Win32Helper.EVENT_OBJECT_SHOW) return;
+            if (eventType == 0x8001 || eventType == 0x8003) return; // Ignore DESTROY / HIDE
+
+            if (eventType == 0x000A) // EVENT_SYSTEM_MOVESIZESTART
+            {
+                if (hwnd != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(hwnd))
+                {
+                    ExplorerChildBarManager.Instance.OnMoveSizeStart(hwnd);
+                }
+                return;
+            }
+            if (eventType == 0x000B) // EVENT_SYSTEM_MOVESIZEEND
+            {
+                if (hwnd != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(hwnd))
+                {
+                    ExplorerChildBarManager.Instance.OnMoveSizeEnd(hwnd);
+                }
+                return;
+            }
+
+            if (eventType == Win32Helper.EVENT_OBJECT_REORDER)
+            {
+                if (idObject == 0 && hwnd != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(hwnd))
+                {
+                    if (ExplorerChildBarManager.Instance.IsResizing(hwnd))
+                    {
+                        ExplorerChildBarManager.Instance.EnsureBarOnTopNow(hwnd);
+                        return;
+                    }
+                    if (ExplorerChildBarManager.Instance.EnsureBarOnTopNow(hwnd))
+                    {
+                        ExplorerChildBarManager.Instance.StartPinBurst(hwnd, 500);
+                    }
+                    else
+                    {
+                        ExplorerChildBarManager.Instance.PinAllNow(hwnd);
+                    }
+                }
+                return;
+            }
+
+            if (eventType == 0x800B)
+            {
+                if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero) return;
+
+                // Fast-path: live CabinetWClass resize updates bar width immediately without polling bursts
+                if (ExplorerChildBarManager.Instance.HasBarFor(hwnd))
+                {
+                    ExplorerChildBarManager.Instance.OnHostResizedOrMoved(hwnd);
+                    return;
+                }
+
+                // Explorer re-laid out a tab or header: keep bar above and tab below without spawning a 1ms burst
+                string lcls = Win32Helper.GetWindowClassName(hwnd);
+                if (lcls == "Microsoft.UI.Content.DesktopChildSiteBridge")
+                {
+                    IntPtr bcab = Win32Helper.GetParent(hwnd);
+                    if (bcab != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(bcab))
+                    {
+                        ExplorerChildBarManager.Instance.EnsureBarOnTopNow(bcab);
+                    }
+                    return;
+                }
+                if (lcls != "ShellTabWindowClass" && lcls != "TabWindowClass") return;
+                IntPtr cab = Win32Helper.GetParent(hwnd);
+                if (cab != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(cab))
+                {
+                    ExplorerChildBarManager.Instance.EnsureBarOnTopNow(cab);
+                    if (!ExplorerChildBarManager.Instance.IsResizing(cab))
+                    {
+                        ExplorerChildBarManager.Instance.PinTabNow(cab, hwnd);
+                    }
+                }
+                return;
+            }
             if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero) return;
-            if (Win32Helper.GetWindowClassName(hwnd) != "CabinetWClass") return;
+
+            string cls = Win32Helper.GetWindowClassName(hwnd);
+            if (cls == "ShellTabWindowClass" || cls == "TabWindowClass")
+            {
+                IntPtr cabinetHwnd = Win32Helper.GetRootWindow(hwnd);
+                if (cabinetHwnd != IntPtr.Zero && ExplorerChildBarManager.Instance.HasBarFor(cabinetHwnd))
+                {
+                    ExplorerChildBarManager.Instance.OnExplorerChildLayoutEvent(cabinetHwnd, hwnd);
+                }
+                return;
+            }
+
+            if (cls != "CabinetWClass") return;
+
+            RedirectState existingState;
+            if (eventType == Win32Helper.EVENT_OBJECT_SHOW && _redirectingWindows.TryGetValue(hwnd, out existingState))
+            {
+                // ShowWindow can reset layered alpha when surfacing the window; re-enforce cloak immediately.
+                CloakWindow(hwnd, existingState);
+                return;
+            }
 
             TrackExistingWindows();
-            HandleNewCabinetWindow(hwnd);
+            HandleNewCabinetWindow(hwnd, eventType == Win32Helper.EVENT_OBJECT_CREATE);
         }
 
-        private void HandleNewCabinetWindow(IntPtr newHwnd)
+        private void HandleNewCabinetWindow(IntPtr newHwnd, bool allowBeforeVisible = false)
         {
             if (!_isRunning || newHwnd == IntPtr.Zero || !Win32Helper.IsWindow(newHwnd)) return;
             if (_knownWindows.Contains(newHwnd) || _redirectingWindows.ContainsKey(newHwnd)) return;
 
-            // Only act once the window actually exists as a visible CabinetWClass (or on EVENT_OBJECT_CREATE wait for SHOW if still hidden)
-            if (!Win32Helper.IsWindowVisible(newHwnd))
+            if (!allowBeforeVisible && !Win32Helper.IsWindowVisible(newHwnd))
             {
                 return;
             }
@@ -229,9 +635,9 @@ namespace ExplorerBookmarkBar.Services
             _redirectingWindows[newHwnd] = state;
 
             int ticks = 0;
-            const int maxTicks = 80; // ~2000ms at 25ms interval
+            const int maxTicks = 180; // ~1800ms at 10ms interval
             var timer = new DispatcherTimer(DispatcherPriority.Normal);
-            timer.Interval = TimeSpan.FromMilliseconds(25);
+            timer.Interval = TimeSpan.FromMilliseconds(10);
             timer.Tick += (s, e) =>
             {
                 ticks++;
@@ -250,8 +656,11 @@ namespace ExplorerBookmarkBar.Services
                     return;
                 }
 
+                // Keep window cloaked while polling so ShowWindow cannot flash before navigation/redirect completes.
+                CloakWindow(newHwnd, state);
+
                 var snapshot = ExplorerComHelper.TryGetExplorerWindowSnapshot(newHwnd);
-                if (snapshot == null && ticks >= 24)
+                if (snapshot == null && ticks >= 8)
                 {
                     snapshot = TryGetFallbackTabTitleSnapshot(newHwnd);
                 }
@@ -365,8 +774,8 @@ namespace ExplorerBookmarkBar.Services
         private static bool IsControlPanelPath(string path)
         {
             if (string.IsNullOrEmpty(path)) return false;
-            return path.IndexOf("26EE0668-A00A-44D7-9371-BEB064C98683", StringComparison.OrdinalIgnoreCase) >= 0
-                || path.IndexOf("5399E694-AE9C-458F-A337-66197F6B01AA", StringComparison.OrdinalIgnoreCase) >= 0;
+            return path.IndexOf("26EE0668", StringComparison.OrdinalIgnoreCase) >= 0
+                || path.IndexOf("5399E694", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void MarkAsKnown(IntPtr hwnd)
@@ -417,11 +826,14 @@ namespace ExplorerBookmarkBar.Services
         {
             try
             {
+                int disableTransitions = 1;
+                Win32Helper.DwmSetWindowAttribute(hwnd, Win32Helper.DWMWA_TRANSITIONS_FORCEDISABLED, ref disableTransitions, sizeof(int));
+
                 int exStyle = Win32Helper.GetWindowLong(hwnd, Win32Helper.GWL_EXSTYLE);
                 if ((exStyle & Win32Helper.WS_EX_LAYERED) == 0)
                 {
                     Win32Helper.SetWindowLong(hwnd, Win32Helper.GWL_EXSTYLE, exStyle | Win32Helper.WS_EX_LAYERED);
-                    state.AddedLayeredStyle = true;
+                    if (state != null) state.AddedLayeredStyle = true;
                 }
                 Win32Helper.SetLayeredWindowAttributes(hwnd, 0, 0, Win32Helper.LWA_ALPHA);
             }
@@ -439,6 +851,9 @@ namespace ExplorerBookmarkBar.Services
                     int exStyle = Win32Helper.GetWindowLong(hwnd, Win32Helper.GWL_EXSTYLE);
                     Win32Helper.SetWindowLong(hwnd, Win32Helper.GWL_EXSTYLE, exStyle & ~Win32Helper.WS_EX_LAYERED);
                 }
+
+                int enableTransitions = 0;
+                Win32Helper.DwmSetWindowAttribute(hwnd, Win32Helper.DWMWA_TRANSITIONS_FORCEDISABLED, ref enableTransitions, sizeof(int));
             }
             catch { }
         }

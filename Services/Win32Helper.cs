@@ -9,6 +9,7 @@ namespace ExplorerBookmarkBar.Services
 {
     public static class Win32Helper
     {
+        public const int DWMWA_TRANSITIONS_FORCEDISABLED = 3;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
         public const int GWL_STYLE = -16;
@@ -33,6 +34,7 @@ namespace ExplorerBookmarkBar.Services
 
         public const uint EVENT_OBJECT_CREATE = 0x8000;
         public const uint EVENT_OBJECT_SHOW = 0x8002;
+        public const uint EVENT_OBJECT_REORDER = 0x8004;
         public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
         public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
@@ -199,6 +201,9 @@ namespace ExplorerBookmarkBar.Services
 
         [DllImport("dwmapi.dll")]
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -435,6 +440,7 @@ namespace ExplorerBookmarkBar.Services
         // ───────────── Low-level keyboard hook (Alt+1..9 bookmark shortcuts) ─────────────
 
         public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct KBDLLHOOKSTRUCT
@@ -446,13 +452,51 @@ namespace ExplorerBookmarkBar.Services
             public IntPtr dwExtraInfo;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
         public const int WH_KEYBOARD_LL = 13;
+        public const int WH_MOUSE_LL = 14;
         public const int WM_SYSKEYDOWN = 0x0104;
+        public const int WM_LBUTTONDOWN = 0x0201;
+        public const int WM_LBUTTONUP = 0x0202;
+        public const int WM_MBUTTONDOWN = 0x0207;
+        public const int WM_MBUTTONUP = 0x0208;
         public const uint LLKHF_ALTDOWN = 0x20;
         public const uint LLKHF_INJECTED = 0x10;
+        public const uint LLMHF_INJECTED = 0x01;
+
+        public const int LVM_GETNEXTITEM = 0x100C;
+        public const int LVM_GETSELECTEDCOUNT = 0x1032;
+        public const int LVNI_FOCUSED = 0x0001;
+        public const int LVNI_SELECTED = 0x0002;
+        public const int SM_CXDOUBLECLK = 36;
+        public const int SM_CYDOUBLECLK = 37;
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll")]
+        public static extern uint GetDoubleClickTime();
+
+        [DllImport("user32.dll")]
+        public static extern int GetSystemMetrics(int nIndex);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(POINT Point);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetShellWindow();
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -550,6 +594,67 @@ namespace ExplorerBookmarkBar.Services
                 return true;
             }, IntPtr.Zero);
             return list;
+        }
+
+        public static bool IsAnyModifierDown()
+        {
+            return (GetAsyncKeyState(0x10) & 0x8000) != 0
+                || (GetAsyncKeyState(0x11) & 0x8000) != 0
+                || (GetAsyncKeyState(0x12) & 0x8000) != 0;
+        }
+
+        public static bool IsDesktopListView(IntPtr hwnd, out IntPtr listViewHwnd)
+        {
+            listViewHwnd = IntPtr.Zero;
+            if (hwnd == IntPtr.Zero) return false;
+
+            IntPtr current = hwnd;
+            for (int depth = 0; depth < 3 && current != IntPtr.Zero; depth++)
+            {
+                if (GetWindowClassName(current) == "SysListView32")
+                {
+                    IntPtr defView = GetParent(current);
+                    if (defView != IntPtr.Zero && GetWindowClassName(defView) == "SHELLDLL_DefView")
+                    {
+                        IntPtr host = GetParent(defView);
+                        if (host != IntPtr.Zero)
+                        {
+                            string hostClass = GetWindowClassName(host);
+                            if (host == GetShellWindow() || hostClass == "Progman" || hostClass == "WorkerW")
+                            {
+                                listViewHwnd = current;
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+                current = GetParent(current);
+            }
+            return false;
+        }
+
+        public static int GetDesktopSelectedCount(IntPtr listViewHwnd)
+        {
+            if (listViewHwnd == IntPtr.Zero) return 0;
+            return SendMessage(listViewHwnd, LVM_GETSELECTEDCOUNT, IntPtr.Zero, IntPtr.Zero).ToInt32();
+        }
+
+        public static int GetDesktopPrimaryItemIndex(IntPtr listViewHwnd)
+        {
+            if (listViewHwnd == IntPtr.Zero) return -1;
+            int focusedSelected = SendMessage(
+                listViewHwnd,
+                LVM_GETNEXTITEM,
+                new IntPtr(-1),
+                new IntPtr(LVNI_FOCUSED | LVNI_SELECTED)).ToInt32();
+            if (focusedSelected >= 0) return focusedSelected;
+
+            return SendMessage(
+                listViewHwnd,
+                LVM_GETNEXTITEM,
+                new IntPtr(-1),
+                new IntPtr(LVNI_SELECTED)).ToInt32();
         }
 
         public static List<IntPtr> GetAllCabinetWindows()

@@ -353,7 +353,8 @@ namespace ExplorerBookmarkBar.Views
                 if (item != null && !string.IsNullOrEmpty(item.Path))
                 {
                     e.Handled = true;
-                    ExplorerComHelper.OpenInNewTab(_currentExplorerHwnd, item.Path);
+                    string targetPath = item.Path;
+                    Dispatcher.BeginInvoke(new Action(() => ExplorerComHelper.OpenInNewTab(_currentExplorerHwnd, targetPath, null, false)));
                 }
             }
             else if (e.ChangedButton == MouseButton.Left)
@@ -564,7 +565,7 @@ namespace ExplorerBookmarkBar.Views
             var item = btn != null ? btn.Tag as BookmarkDisplayItem : null;
             if (item != null)
             {
-                ExplorerComHelper.OpenInNewTab(_currentExplorerHwnd, item.Path);
+                ExplorerComHelper.OpenInNewTab(_currentExplorerHwnd, item.Path, null, false);
             }
         }
 

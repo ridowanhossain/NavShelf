@@ -5,7 +5,7 @@
 **The fastest way to access your favourite folders in Windows 11 & 10 File Explorer.**  
 Pin folders to a Chrome-style bookmark bar, open them in new tabs with middle-click, and never dig through the sidebar again.
 
-[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.3.0-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
+[![Download](https://img.shields.io/badge/⬇️%20Free%20Download-NavShelf%20v1.3.1-0066ff?style=for-the-badge)](https://navshelf.nexonic.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows)](https://navshelf.nexonic.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 [![.NET Framework](https://img.shields.io/badge/.NET_Framework-4.8-512BD4?style=for-the-badge&logo=dotnet)](https://dotnet.microsoft.com/)
@@ -134,6 +134,13 @@ NavShelf also protects your bookmarks on its own. Every save goes to a temporary
 ---
 
 ## 🆕 What's New
+
+### v1.3.1
+**Improvements & Fixes**
+- ⚡ **Instant Desktop double-click tab redirection**: Double-clicking a folder on the Desktop now intercepts directly (`IShellFolderViewDual`) and opens it in an existing File Explorer tab without waiting for a temporary window to appear.
+- 🎯 **Background middle-click tabs**: Middle-clicking any bookmark opens the folder strictly in a new background tab while keeping your current active tab selected and untouched.
+- 🪟 **Smooth corner-drag resizing & multi-monitor DPI**: Fixed window resize lag/flicker (`MOVESIZESTART`/`MOVESIZEEND` + `SWP_NOCOPYBITS` gating) and recreated child `HwndSource` cleanly when dragging File Explorer across monitors with different DPI scaling (e.g. 100% ↔ 125%).
+- 🎛️ **Control Panel & overflow fixes**: Stopped attaching the bookmark bar to Control Panel windows, and updated the `>>` overflow dropdown to show only hidden/clipped bookmarks starting after the last visible item.
 
 ### v1.3.0
 **New features**

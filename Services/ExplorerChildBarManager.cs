@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Threading;
@@ -33,12 +35,16 @@ namespace ExplorerBookmarkBar.Services
             public IntPtr ShellTabHwnd;
             public int LastWidth;
             public int LastHeight;
+            public int LastClientHeight;
             public int LastTop;
             public bool LastZoomed;
             public int SettleTicks;
             public double LastDpi;
             public double LastLogicalTop;
             public bool RepaintParentAfterSettle;
+            public bool IsMoveSizing;
+            public int LastResizeTick;
+            public DispatcherTimer ResizeEndTimer;
         }
 
         private const int WM_DPICHANGED_BEFOREPARENT = 0x02E2;
@@ -73,10 +79,18 @@ namespace ExplorerBookmarkBar.Services
             }
         }
 
-        private readonly Dictionary<IntPtr, ChildBarEntry> _activeBars = new Dictionary<IntPtr, ChildBarEntry>();
+        private readonly ConcurrentDictionary<IntPtr, ChildBarEntry> _activeBars = new ConcurrentDictionary<IntPtr, ChildBarEntry>();
+        private readonly object _pinBurstLock = new object();
+        private readonly Dictionary<IntPtr, long> _pinBurstDeadlines = new Dictionary<IntPtr, long>();
+        private readonly HashSet<IntPtr> _activePinBurstThreads = new HashSet<IntPtr>();
         private readonly DispatcherTimer _syncTimer;
         private bool _isPaused = false;
         private int _themeCheckTick = 0;
+
+        [DllImport("winmm.dll")]
+        private static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")]
+        private static extern uint timeEndPeriod(uint ms);
 
         public ExplorerChildBarManager()
         {
@@ -109,6 +123,147 @@ namespace ExplorerBookmarkBar.Services
         public bool IsPaused
         {
             get { return _isPaused; }
+        }
+
+        /// <summary>Returns true if a bookmark bar is currently attached to the given Explorer window.</summary>
+        public bool HasBarFor(IntPtr hostHwnd)
+        {
+            return hostHwnd != IntPtr.Zero && _activeBars.ContainsKey(hostHwnd);
+        }
+
+        private bool IsActivelyResizing(ChildBarEntry entry)
+        {
+            if (entry == null) return false;
+            if ((Win32Helper.GetAsyncKeyState(Win32Helper.VK_LBUTTON) & 0x8000) == 0)
+            {
+                entry.IsMoveSizing = false;
+                return false;
+            }
+            return entry.IsMoveSizing || unchecked(Environment.TickCount - entry.LastResizeTick) < 90;
+        }
+
+        public bool IsResizing(IntPtr expHwnd)
+        {
+            ChildBarEntry entry;
+            if (expHwnd != IntPtr.Zero && _activeBars.TryGetValue(expHwnd, out entry))
+            {
+                return IsActivelyResizing(entry);
+            }
+            return false;
+        }
+
+        private void CancelPinBurst(IntPtr expHwnd)
+        {
+            lock (_pinBurstLock)
+            {
+                _pinBurstDeadlines.Remove(expHwnd);
+            }
+        }
+
+        public void OnMoveSizeStart(IntPtr expHwnd)
+        {
+            ChildBarEntry entry;
+            if (expHwnd != IntPtr.Zero && _activeBars.TryGetValue(expHwnd, out entry))
+            {
+                entry.IsMoveSizing = true;
+                entry.LastResizeTick = Environment.TickCount;
+                CancelPinBurst(expHwnd);
+            }
+        }
+
+        public void OnMoveSizeEnd(IntPtr expHwnd)
+        {
+            ChildBarEntry entry;
+            if (expHwnd != IntPtr.Zero && _activeBars.TryGetValue(expHwnd, out entry))
+            {
+                entry.IsMoveSizing = false;
+                if (entry.ResizeEndTimer != null)
+                {
+                    entry.ResizeEndTimer.Stop();
+                }
+                UpdateOrAttachChildBar(expHwnd);
+
+                var settleTimer = new DispatcherTimer(DispatcherPriority.Render);
+                settleTimer.Interval = TimeSpan.FromMilliseconds(120);
+                settleTimer.Tick += (s, e) =>
+                {
+                    settleTimer.Stop();
+                    if (!_isPaused && _activeBars.ContainsKey(expHwnd) && Win32Helper.IsWindow(expHwnd) && !Win32Helper.IsIconic(expHwnd))
+                    {
+                        UpdateOrAttachChildBar(expHwnd);
+                        PinAllNow(expHwnd);
+                    }
+                };
+                settleTimer.Start();
+            }
+        }
+
+        /// <summary>
+        /// Keeps the bookmark bar on top and all tab windows pushed down below it at ~1ms cadence
+        /// for durationMs (coalesced per Explorer window) while Explorer creates/switches/lays out tabs.
+        /// </summary>
+        public void StartPinBurst(IntPtr expHwnd, int durationMs = 350)
+        {
+            if (_isPaused || expHwnd == IntPtr.Zero || !_activeBars.ContainsKey(expHwnd)) return;
+            if (IsResizing(expHwnd)) return;
+
+            PinAllNow(expHwnd);
+
+            long durationTicks = (long)(durationMs * (Stopwatch.Frequency / 1000.0));
+            long targetTicks = Stopwatch.GetTimestamp() + durationTicks;
+            bool shouldSpawn = false;
+            lock (_pinBurstLock)
+            {
+                long existingDeadline;
+                if (!_pinBurstDeadlines.TryGetValue(expHwnd, out existingDeadline) || targetTicks > existingDeadline)
+                {
+                    _pinBurstDeadlines[expHwnd] = targetTicks;
+                }
+                if (_activePinBurstThreads.Add(expHwnd))
+                {
+                    shouldSpawn = true;
+                }
+            }
+
+            if (!shouldSpawn) return;
+
+            var thread = new Thread(() =>
+            {
+                timeBeginPeriod(1);
+                try
+                {
+                    while (!_isPaused)
+                    {
+                        long deadline;
+                        lock (_pinBurstLock)
+                        {
+                            if (!_pinBurstDeadlines.TryGetValue(expHwnd, out deadline))
+                                break;
+                            if (Stopwatch.GetTimestamp() >= deadline)
+                                break;
+                        }
+
+                        if (!Win32Helper.IsWindow(expHwnd) || !_activeBars.ContainsKey(expHwnd) || IsResizing(expHwnd))
+                            break;
+
+                        PinAllNow(expHwnd);
+                        Thread.Sleep(1);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    lock (_pinBurstLock)
+                    {
+                        _pinBurstDeadlines.Remove(expHwnd);
+                        _activePinBurstThreads.Remove(expHwnd);
+                    }
+                    timeEndPeriod(1);
+                }
+            });
+            thread.IsBackground = true;
+            thread.Priority = ThreadPriority.Highest;
+            thread.Start();
         }
 
         /// <summary>Returns the bookmark bar attached to the given Explorer window / file dialog, or null.</summary>
@@ -155,6 +310,233 @@ namespace ExplorerBookmarkBar.Services
             }
         }
 
+        /// <summary>
+        /// Thread-safe-ish helper for a background thread: keeps the bar on top and every tab below it.
+        /// Called ~every millisecond while a new tab is being opened so Explorer's own re-layout is undone
+        /// before the next frame is composed.
+        /// </summary>
+        public void PinAllNow(IntPtr expHwnd)
+        {
+            try
+            {
+                ChildBarEntry entry;
+                if (!_activeBars.TryGetValue(expHwnd, out entry)) return;
+                if (entry.LastHeight <= 0 || entry.LastTop <= 0) return;
+                EnsureBarOnTopNow(expHwnd);
+                var tabs = Win32Helper.GetExplorerTabs(expHwnd);
+                for (int i = 0; i < tabs.Count; i++)
+                {
+                    PinTabNow(expHwnd, tabs[i]);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Ensures the bookmark bar sits above all Explorer content/bridge children while leaving
+        /// Explorer's title-bar scaffolding windows undisturbed at the top so Explorer doesn't fight Z-order.
+        /// Returns true if the bar's Z-order had to be corrected.
+        /// </summary>
+        public bool EnsureBarOnTopNow(IntPtr expHwnd)
+        {
+            if (_isPaused) return false;
+            ChildBarEntry entry;
+            if (!_activeBars.TryGetValue(expHwnd, out entry)) return false;
+            try
+            {
+                if (entry.ChildHwnd == IntPtr.Zero || !Win32Helper.IsWindow(entry.ChildHwnd))
+                    return false;
+
+                IntPtr cur = Win32Helper.GetTopWindow(expHwnd);
+                if (cur == entry.ChildHwnd) return false;
+
+                IntPtr insertAfter = Win32Helper.HWND_TOP;
+                bool coveredByContent = false;
+                int steps = 0;
+                while (cur != IntPtr.Zero && cur != entry.ChildHwnd && steps < 16)
+                {
+                    string cls = Win32Helper.GetWindowClassName(cur);
+                    if (cls == "InputNonClientPointerSource" || cls == "TITLE_BAR_SCAFFOLDING_WINDOW_CLASS")
+                    {
+                        insertAfter = cur;
+                    }
+                    else
+                    {
+                        coveredByContent = true;
+                        break;
+                    }
+                    cur = Win32Helper.GetNextWindow(cur, Win32Helper.GW_HWNDNEXT);
+                    steps++;
+                }
+
+                if (!coveredByContent && cur == entry.ChildHwnd)
+                    return false;
+
+                Win32Helper.SetWindowPos(entry.ChildHwnd, insertAfter, 0, 0, 0, 0,
+                    Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE
+                    | Win32Helper.SWP_NOSENDCHANGING);
+                return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Lightweight: if a tab window was moved by Explorer, snap it back below the bar right away.</summary>
+        public void PinTabNow(IntPtr expHwnd, IntPtr tabHwnd)
+        {
+            if (_isPaused) return;
+            ChildBarEntry entry;
+            if (!_activeBars.TryGetValue(expHwnd, out entry)) return;
+            if (entry.LastHeight <= 0 || entry.LastTop <= 0) return;
+            try
+            {
+                Win32Helper.RECT clientRect;
+                if (!Win32Helper.GetClientRect(expHwnd, out clientRect) || clientRect.Width < 100) return;
+                int contentTop = entry.LastTop + entry.LastHeight;
+                int tabHeight = clientRect.Height - contentTop;
+                if (tabHeight <= 50) return;
+
+                Win32Helper.POINT o = new Win32Helper.POINT { X = 0, Y = 0 };
+                Win32Helper.ClientToScreen(expHwnd, ref o);
+                Win32Helper.RECT r;
+                if (!Win32Helper.GetWindowRect(tabHwnd, out r)) return;
+                if (Math.Abs((r.Top - o.Y) - contentTop) > 1 || Math.Abs((r.Bottom - r.Top) - tabHeight) > 2)
+                {
+                    Win32Helper.SetWindowPos(tabHwnd, IntPtr.Zero, 0, contentTop, clientRect.Width, tabHeight,
+                        Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOZORDER | Win32Helper.SWP_NOSENDCHANGING | Win32Helper.SWP_ASYNCWINDOWPOS);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Fast-path for live corner-drag resizing of CabinetWClass: updates child bar width immediately
+        /// on EVENT_OBJECT_LOCATIONCHANGE without RedrawWindow/InvalidateVisual/StartPinBurst overhead.
+        /// </summary>
+        public void OnHostResizedOrMoved(IntPtr expHwnd)
+        {
+            if (_isPaused || expHwnd == IntPtr.Zero) return;
+            ChildBarEntry entry;
+            if (!_activeBars.TryGetValue(expHwnd, out entry)) return;
+            if (entry.LastHeight <= 0 || entry.LastTop <= 0) return;
+            if (Win32Helper.IsIconic(expHwnd)) return;
+
+            try
+            {
+                double dpiScale = Win32Helper.GetWindowDpiScale(expHwnd);
+                if (dpiScale > 0 && Math.Abs(dpiScale - entry.LastDpi) > 0.001)
+                {
+                    UpdateOrAttachChildBar(expHwnd);
+                    return;
+                }
+
+                Win32Helper.RECT clientRect;
+                if (!Win32Helper.GetClientRect(expHwnd, out clientRect) || clientRect.Width < 100 || clientRect.Height < 100)
+                    return;
+
+                // Pure window drag-move (size unchanged): do nothing
+                if (clientRect.Width == entry.LastWidth && clientRect.Height == entry.LastClientHeight)
+                    return;
+
+                entry.LastResizeTick = Environment.TickCount;
+                CancelPinBurst(expHwnd);
+
+                bool widthChanged = (clientRect.Width != entry.LastWidth);
+                entry.LastWidth = clientRect.Width;
+                entry.LastClientHeight = clientRect.Height;
+
+                if (widthChanged && entry.ChildHwnd != IntPtr.Zero && Win32Helper.IsWindow(entry.ChildHwnd))
+                {
+                    Win32Helper.SetWindowPos(
+                        entry.ChildHwnd,
+                        IntPtr.Zero,
+                        0,
+                        entry.LastTop,
+                        clientRect.Width,
+                        entry.LastHeight,
+                        Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOZORDER | Win32Helper.SWP_NOSENDCHANGING
+                    );
+                }
+
+                EnsureBarOnTopNow(expHwnd);
+                if (!IsActivelyResizing(entry))
+                {
+                    if (entry.ShellTabHwnd != IntPtr.Zero && Win32Helper.IsWindow(entry.ShellTabHwnd))
+                    {
+                        PinTabNow(expHwnd, entry.ShellTabHwnd);
+                    }
+                }
+                else
+                {
+                    if (entry.ResizeEndTimer == null)
+                    {
+                        var trackedEntry = entry;
+                        var trackedHwnd = expHwnd;
+                        entry.ResizeEndTimer = new DispatcherTimer(DispatcherPriority.Render);
+                        entry.ResizeEndTimer.Interval = TimeSpan.FromMilliseconds(65);
+                        entry.ResizeEndTimer.Tick += (s, e) =>
+                        {
+                            trackedEntry.ResizeEndTimer.Stop();
+                            if (!_isPaused && _activeBars.ContainsKey(trackedHwnd) && Win32Helper.IsWindow(trackedHwnd))
+                            {
+                                PinAllNow(trackedHwnd);
+                            }
+                        };
+                    }
+                    entry.ResizeEndTimer.Stop();
+                    entry.ResizeEndTimer.Start();
+                }
+            }
+            catch { }
+        }
+
+        private readonly HashSet<IntPtr> _pendingLayoutBurst = new HashSet<IntPtr>();
+
+        /// <summary>
+        /// Immediately re-asserts child bar Z-order and pushes down ShellTabWindowClass children
+        /// when Explorer creates, shows, or reorders tabs instead of waiting up to 40ms for _syncTimer.
+        /// </summary>
+        public void OnExplorerChildLayoutEvent(IntPtr expHwnd, IntPtr childHwnd)
+        {
+            if (_isPaused || expHwnd == IntPtr.Zero) return;
+
+            ChildBarEntry entry;
+            if (!_activeBars.TryGetValue(expHwnd, out entry)) return;
+            if (!Win32Helper.IsWindow(expHwnd) || Win32Helper.IsIconic(expHwnd)) return;
+
+            try
+            {
+                EnsureBarOnTopNow(expHwnd);
+
+                // Immediately push down the newly created/shown tab window without waiting for _syncTimer
+                // and without forcing a full redraw of the bookmark bar.
+                if (childHwnd != IntPtr.Zero && Win32Helper.IsWindow(childHwnd))
+                {
+                    PinTabNow(expHwnd, childHwnd);
+                }
+
+                StartPinBurst(expHwnd, 600);
+
+                if (_pendingLayoutBurst.Add(expHwnd))
+                {
+                    var burstTimer = new DispatcherTimer(DispatcherPriority.Send);
+                    burstTimer.Interval = TimeSpan.FromMilliseconds(15);
+                    burstTimer.Tick += (s, e) =>
+                    {
+                        burstTimer.Stop();
+                        _pendingLayoutBurst.Remove(expHwnd);
+                        if (_isPaused || !_activeBars.ContainsKey(expHwnd)) return;
+                        if (Win32Helper.IsWindow(expHwnd) && !Win32Helper.IsIconic(expHwnd))
+                        {
+                            UpdateOrAttachChildBar(expHwnd);
+                        }
+                    };
+                    burstTimer.Start();
+                }
+            }
+            catch { }
+        }
+
         private void SyncExplorerChildBars()
         {
             if (_isPaused) return;
@@ -197,8 +579,14 @@ namespace ExplorerBookmarkBar.Services
                 }
                 foreach (var c in closed)
                 {
+                    bool alive = Win32Helper.IsWindow(c);
+                    App.Log("Detaching bar from HWND 0x" + c.ToString("X")
+                        + " (alive=" + alive
+                        + ", visible=" + (alive ? Win32Helper.IsWindowVisible(c).ToString() : "-")
+                        + ", iconic=" + (alive ? Win32Helper.IsIconic(c).ToString() : "-") + ")");
                     DisposeBarEntry(_activeBars[c]);
-                    _activeBars.Remove(c);
+                    ChildBarEntry removed;
+                    _activeBars.TryRemove(c, out removed);
                 }
             }
             catch (Exception ex)
@@ -233,7 +621,7 @@ namespace ExplorerBookmarkBar.Services
                     // and not just any bridge) so the bar lines up in maximized, restored and any DPI.
                     Win32Helper.POINT origin = new Win32Helper.POINT { X = 0, Y = 0 };
                     Win32Helper.ClientToScreen(expHwnd, ref origin);
-                    int minHeader = (int)Math.Round(115 * dpiScale);
+                    int minHeader = (int)Math.Round(96 * dpiScale);
                     int maxHeader = (int)Math.Round(165 * dpiScale);
                     int maxHeaderTop = (int)Math.Round(24 * dpiScale);
                     int maxWidthDiff = (int)Math.Round(16 * dpiScale);
@@ -268,16 +656,30 @@ namespace ExplorerBookmarkBar.Services
                         return true;
                     }, IntPtr.Zero);
 
-                    // Moved to a monitor with a different DPI (e.g. 100% <-> 125%): Explorer rebuilds
-                    // its XAML header bridge over several frames.
-                    if (existing != null && Math.Abs(dpiScale - existing.LastDpi) > 0.001)
+                    // Moved to a monitor with a different DPI (e.g. 100% <-> 125%):
+                    // .NET 4.8 WS_CHILD HwndSource retains its creation-time WPF DPI transform, so recreate
+                    // the HwndSource at the new monitor's DPI rather than keeping a scaled/clipped bar.
+                    bool dpiChanged = (existing != null && Math.Abs(dpiScale - existing.LastDpi) > 0.001);
+                    if (dpiChanged)
                     {
-                        existing.LastDpi = dpiScale;
-                        existing.SettleTicks = SettleTickCount;
-                        existing.RepaintParentAfterSettle = true;
+                        DisposeBarEntry(existing);
+                        ChildBarEntry removed;
+                        _activeBars.TryRemove(expHwnd, out removed);
+                        existing = null;
+                        if (headerBottom <= 0)
+                        {
+                            return;
+                        }
                     }
 
-                    double logicalTop = (existing != null && existing.LastLogicalTop >= 115 && existing.LastLogicalTop <= 165)
+                    // Do not attach to windows without a WinUI DesktopChildSiteBridge header (e.g. Control Panel),
+                    // or before Explorer finishes creating its header.
+                    if (existing == null && headerBottom <= 0)
+                    {
+                        return;
+                    }
+
+                    double logicalTop = (existing != null && existing.LastLogicalTop >= 96 && existing.LastLogicalTop <= 165)
                         ? existing.LastLogicalTop
                         : 136.0;
                     int expectedTopFromLogical = (int)Math.Round(logicalTop * dpiScale);
@@ -300,7 +702,6 @@ namespace ExplorerBookmarkBar.Services
                     }
                     else
                     {
-                        // Not attached yet and header not ready: wait for the next tick.
                         return;
                     }
 
@@ -376,6 +777,7 @@ namespace ExplorerBookmarkBar.Services
                         ShellTabHwnd = contentWindows.Count > 0 ? contentWindows[0] : IntPtr.Zero,
                         LastWidth = clientWidth,
                         LastHeight = physicalBarHeight,
+                        LastClientHeight = clientHeight,
                         LastTop = topBarHeight,
                         LastZoomed = Win32Helper.IsZoomed(expHwnd),
                         LastDpi = dpiScale,
@@ -389,7 +791,7 @@ namespace ExplorerBookmarkBar.Services
                     // moment, which leaves a "ghost" copy of the bar painted over Explorer's tabs.
                     var hookedEntry = entry;
                     source.AddHook((IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) =>
-                        ChildBarHook(hookedEntry, msg, lParam));
+                        ChildBarHook(hookedEntry, msg, lParam, ref handled));
 
                     Win32Helper.SetWindowPos(
                         source.Handle,
@@ -434,15 +836,15 @@ namespace ExplorerBookmarkBar.Services
                     {
                         entry.LastWidth = clientWidth;
                         entry.LastHeight = physicalBarHeight;
+                        entry.LastClientHeight = clientHeight;
                         entry.LastTop = topBarHeight;
 
-                        bool isTopZ = Win32Helper.GetTopWindow(expHwnd) == entry.ChildHwnd;
-                        uint swpFlags = Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOCOPYBITS;
-                        if (isTopZ) swpFlags |= Win32Helper.SWP_NOZORDER;
+                        uint swpFlags = Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOZORDER;
+                        if (settling) swpFlags |= Win32Helper.SWP_NOCOPYBITS;
 
                         Win32Helper.SetWindowPos(
                             entry.ChildHwnd,
-                            Win32Helper.HWND_TOP,
+                            IntPtr.Zero,
                             0,
                             topBarHeight,
                             clientWidth,
@@ -450,33 +852,27 @@ namespace ExplorerBookmarkBar.Services
                             swpFlags
                         );
 
-                        // Repaint the bar so it never appears half-drawn after resizing
-                        Win32Helper.RedrawWindow(entry.ChildHwnd, IntPtr.Zero, IntPtr.Zero,
-                            Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ALLCHILDREN);
-                        try { if (entry.Control != null) entry.Control.InvalidateVisual(); } catch { }
+                        EnsureBarOnTopNow(expHwnd);
+
+                        // Only force full redraw during maximize/restore/DPI settle; normal drag resize repaints smoothly via WPF
+                        if (settling)
+                        {
+                            Win32Helper.RedrawWindow(entry.ChildHwnd, IntPtr.Zero, IntPtr.Zero,
+                                Win32Helper.RDW_INVALIDATE | Win32Helper.RDW_ALLCHILDREN);
+                            try { if (entry.Control != null) entry.Control.InvalidateVisual(); } catch { }
+                        }
                     }
                     else
                     {
-                        // Only bring to top of Z-order if another child window actually moved above us
-                        if (Win32Helper.GetTopWindow(expHwnd) != entry.ChildHwnd)
-                        {
-                            Win32Helper.SetWindowPos(
-                                entry.ChildHwnd,
-                                Win32Helper.HWND_TOP,
-                                0,
-                                0,
-                                0,
-                                0,
-                                Win32Helper.SWP_NOACTIVATE | Win32Helper.SWP_NOMOVE | Win32Helper.SWP_NOSIZE
-                            );
-                        }
+                        // Only bring above Explorer content windows if another content child moved above us
+                        EnsureBarOnTopNow(expHwnd);
                     }
                 }
 
                 // Push down folder content windows (ShellTabWindowClass or DUIViewWndClassName)
                 int contentTop = topBarHeight + physicalBarHeight;
 
-                if (!isFileDialog)
+                if (!isFileDialog && !IsActivelyResizing(entry))
                 {
                     int tabHeight = clientHeight - contentTop;
                     if (tabHeight > 50 && contentWindows.Count > 0)
@@ -559,32 +955,33 @@ namespace ExplorerBookmarkBar.Services
         /// move the child to (0,0) during a cross-monitor DPI change) and re-syncs right after the DPI
         /// switch instead of waiting for the next timer tick.
         /// </summary>
-        private IntPtr ChildBarHook(ChildBarEntry entry, int msg, IntPtr lParam)
+        private IntPtr ChildBarHook(ChildBarEntry entry, int msg, IntPtr lParam, ref bool handled)
         {
             try
             {
+                if (msg == 0x0014 /* WM_ERASEBKGND */)
+                {
+                    // Prevent Win32 GDI from erasing the newly exposed area during drag resize before WPF presents
+                    handled = true;
+                    return (IntPtr)1;
+                }
                 if (msg == WM_DPICHANGED_BEFOREPARENT || msg == WM_DPICHANGED_AFTERPARENT)
                 {
-                    double newDpi = Win32Helper.GetWindowDpiScale(entry.ExplorerHwnd);
-                    if (newDpi <= 0) newDpi = Win32Helper.GetWindowDpiScale(entry.ChildHwnd);
-                    if (newDpi > 0 && Math.Abs(newDpi - entry.LastDpi) > 0.001)
+                    IntPtr targetExp = entry.ExplorerHwnd;
+                    Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
                     {
-                        double logicalTop = (entry.LastLogicalTop >= 115 && entry.LastLogicalTop <= 165)
-                            ? entry.LastLogicalTop
-                            : 136.0;
-                        entry.LastTop = (int)Math.Round(logicalTop * newDpi);
-                        entry.LastDpi = newDpi;
-                    }
-                    entry.LastHeight = -1;
-                    entry.SettleTicks = SettleTickCount;
-                    entry.RepaintParentAfterSettle = true;
+                        if (!_isPaused && targetExp != IntPtr.Zero && Win32Helper.IsWindow(targetExp) && !Win32Helper.IsIconic(targetExp))
+                        {
+                            UpdateOrAttachChildBar(targetExp);
+                        }
+                    }));
                 }
                 else if (msg == Win32Helper.WM_WINDOWPOSCHANGING && entry.LastTop > 0 && lParam != IntPtr.Zero)
                 {
                     double curDpi = Win32Helper.GetWindowDpiScale(entry.ExplorerHwnd);
                     if (curDpi > 0 && Math.Abs(curDpi - entry.LastDpi) > 0.001)
                     {
-                        double logicalTop = (entry.LastLogicalTop >= 115 && entry.LastLogicalTop <= 165)
+                        double logicalTop = (entry.LastLogicalTop >= 96 && entry.LastLogicalTop <= 165)
                             ? entry.LastLogicalTop
                             : 136.0;
                         entry.LastTop = (int)Math.Round(logicalTop * curDpi);
@@ -617,7 +1014,7 @@ namespace ExplorerBookmarkBar.Services
                             entry.LastHeight = targetH;
                         }
                     }
-                    if ((wp.flags & Win32Helper.SWP_NOCOPYBITS) == 0)
+                    if (entry.SettleTicks > 0 && (wp.flags & Win32Helper.SWP_NOCOPYBITS) == 0)
                     {
                         wp.flags |= Win32Helper.SWP_NOCOPYBITS;
                         changed = true;
@@ -634,6 +1031,16 @@ namespace ExplorerBookmarkBar.Services
 
         private void DisposeBarEntry(ChildBarEntry entry)
         {
+            try
+            {
+                if (entry.ResizeEndTimer != null)
+                {
+                    entry.ResizeEndTimer.Stop();
+                    entry.ResizeEndTimer = null;
+                }
+            }
+            catch { }
+
             try
             {
                 if (entry.ChildHwnd != IntPtr.Zero && Win32Helper.IsWindow(entry.ChildHwnd))

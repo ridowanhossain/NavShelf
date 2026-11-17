@@ -461,7 +461,7 @@ namespace ExplorerBookmarkBar.Views
             }
             else if (mode == OpenMode.NewTab && !_isFileDialog)
             {
-                ExplorerComHelper.OpenInNewTab(_explorerHwnd, path);
+                ExplorerComHelper.OpenInNewTab(_explorerHwnd, path, null, false);
             }
             else
             {
@@ -518,7 +518,8 @@ namespace ExplorerBookmarkBar.Views
                 var item = btn != null ? btn.Tag as BookmarkDisplayItem : null;
                 if (item != null && !item.IsGroup && !string.IsNullOrEmpty(item.Path))
                 {
-                    OpenPath(item.Path, OpenMode.NewTab);
+                    string targetPath = item.Path;
+                    Dispatcher.BeginInvoke(new Action(() => OpenPath(targetPath, OpenMode.NewTab)));
                 }
             }
             else if (e.ChangedButton == MouseButton.Left)
@@ -766,7 +767,8 @@ namespace ExplorerBookmarkBar.Views
                 e.Handled = true;
                 root.IsOpen = false;
                 if (CheckModalBlocking()) return;
-                OpenPath(path, OpenMode.NewTab);
+                string targetPath = path;
+                Dispatcher.BeginInvoke(new Action(() => OpenPath(targetPath, OpenMode.NewTab)));
             };
             mi.PreviewMouseUp += (s, e) =>
             {
@@ -1554,11 +1556,28 @@ namespace ExplorerBookmarkBar.Views
             if (CheckModalBlocking()) return;
 
             var root = CreateMenu(BtnOverflow);
+            double viewportW = BookmarksScrollViewer != null ? BookmarksScrollViewer.ViewportWidth : 0;
 
-            foreach (var b in _manager.Bookmarks)
+            for (int i = 0; i < _displayItems.Count; i++)
             {
-                if (b == null) continue;
-                var itemSource = b;
+                var displayItem = _displayItems[i];
+                var itemSource = displayItem != null ? displayItem.Source : null;
+                if (itemSource == null) continue;
+
+                // Only list items that are hidden or clipped outside the visible bar area
+                if (viewportW > 0 && BookmarksItemsControl != null)
+                {
+                    var container = BookmarksItemsControl.ItemContainerGenerator.ContainerFromIndex(i) as FrameworkElement;
+                    if (container != null && container.ActualWidth > 0)
+                    {
+                        Point topLeft = container.TranslatePoint(new Point(0, 0), BookmarksScrollViewer);
+                        double rightEdge = topLeft.X + container.ActualWidth;
+                        if (topLeft.X >= -1.0 && rightEdge <= viewportW + 2.0)
+                        {
+                            continue;
+                        }
+                    }
+                }
 
                 if (itemSource.IsFolder)
                 {
